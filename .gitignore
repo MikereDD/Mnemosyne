@@ -1,0 +1,98 @@
+# Mnemosyne
+# Initial .gitignore — expand as implementation choices are made.
+
+# OS files
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Editors / IDEs
+.vscode/
+.idea/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+*.swp
+*.swo
+*~
+
+# Local environment / secrets
+.env
+.env.*
+!.env.example
+*.secret
+*.secrets
+secrets/
+config.local.*
+*.local.json
+
+# Logs
+*.log
+logs/
+
+# Temporary / cache
+tmp/
+temp/
+.cache/
+cache/
+*.tmp
+*.temp
+*.bak
+
+# Build / distribution output
+build/
+dist/
+out/
+bin/
+obj/
+
+# Language/runtime caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+node_modules/
+target/
+
+# Coverage / test output
+.coverage
+coverage/
+htmlcov/
+test-results/
+
+# Download / staging / generated media
+downloads/
+staging/
+work/
+output/
+
+# Media files should not normally be committed to source control
+*.mp3
+*.m4a
+*.m4b
+*.aac
+*.flac
+*.ogg
+*.opus
+*.wav
+*.wma
+*.epub
+*.mobi
+*.azw
+*.azw3
+*.pdf
+
+# Large archives/packages
+*.zip
+*.7z
+*.rar
+*.tar
+*.gz
+*.bz2
+*.xz
+
+# Preserve project branding assets
+!assets/
+!assets/**
