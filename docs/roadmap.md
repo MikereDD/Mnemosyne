@@ -36,10 +36,15 @@ Initial target: Archive.org.
 - [x] Safe Fetch v1 — basic audio signature verification
 - [x] Safe Fetch v1 — SHA-256 recording
 - [x] Safe Fetch v1 — staging provenance report
+- [x] Canonical staged audio naming
+- [x] Cover download into staging
+- [x] Cover signature/dimension verification
+- [x] Staging provenance report schema v2
 - [ ] External metadata enrichment
 - [ ] Resume/retry
-- [ ] Cover retrieval
+- [ ] Metadata inspection
 - [ ] Metadata normalization/tagging
+- [ ] Edition-aware cover validation/scoring
 - [ ] Final destination placement
 - [ ] Final verification
 - [ ] Job ledger/state integration

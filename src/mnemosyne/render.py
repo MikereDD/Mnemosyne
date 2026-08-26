@@ -118,22 +118,35 @@ def render_fetch_result(result: FetchResult) -> None:
     table.add_row("Job", result.job_id)
     table.add_row("Staging", str(result.staging_dir))
     table.add_row("Audio", str(result.audio.path))
-    table.add_row("Size", _size(result.audio.actual_size))
-    table.add_row("Signature", result.audio.signature)
-    table.add_row("SHA-256", result.audio.sha256)
+    table.add_row("Audio size", _size(result.audio.actual_size))
+    table.add_row("Audio signature", result.audio.signature)
+    table.add_row("Audio SHA-256", result.audio.sha256)
+
+    if result.cover is not None:
+        dimensions = (
+            f"{result.cover.width}×{result.cover.height}"
+            if result.cover.width and result.cover.height
+            else "unknown"
+        )
+        table.add_row("Cover", str(result.cover.path))
+        table.add_row("Cover size", _size(result.cover.actual_size))
+        table.add_row("Cover signature", result.cover.signature)
+        table.add_row("Cover dimensions", dimensions)
+        table.add_row("Cover SHA-256", result.cover.sha256)
+
     table.add_row("Report", str(result.report_path))
 
     console.print(
         Panel(
             table,
-            title="[bold green]STAGED + VERIFIED[/bold green]",
+            title="[bold green]STAGED + NORMALIZED + VERIFIED[/bold green]",
             border_style="green",
         )
     )
     console.print(
         Panel(
             "[bold]Final library modified: NO[/bold]\n"
-            "The verified source audio remains isolated in Mnemosyne staging.",
+            "Canonical filenames and validated artwork remain isolated in Mnemosyne staging.",
             border_style="cyan",
         )
     )
