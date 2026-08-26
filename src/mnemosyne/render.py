@@ -5,6 +5,7 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
+from .adoption import AdoptionResult
 from .comparison import ComparisonResult
 from .fetcher import FetchResult
 from .inspection import MetadataInspection
@@ -168,7 +169,6 @@ def render_inspection(result: MetadataInspection) -> None:
 
 def render_comparison(result: ComparisonResult) -> None:
     console.print(Panel.fit("[bold]Mnemosyne[/bold]\n[dim]Actual candidate quality comparison[/dim]", border_style="cyan"))
-
     table = Table(title="Downloaded candidate comparison")
     table.add_column("Rank", justify="right")
     table.add_column("Source file")
@@ -203,5 +203,41 @@ def render_comparison(result: ComparisonResult) -> None:
             f"[bold]Comparison report:[/bold] {result.report_path}\n\n"
             "[bold green]Final library modified: NO[/bold green]",
             border_style="green",
+        )
+    )
+
+
+def render_adoption(result: AdoptionResult) -> None:
+    quality = result.adopted_quality
+    table = Table(show_header=False, box=None, pad_edge=False)
+    table.add_column(style="bold")
+    table.add_column()
+    table.add_row("Canonical staged source", str(result.canonical_path))
+    table.add_row("Comparison winner", str(result.source_comparison_path))
+    table.add_row("Rollback backup", str(result.backup_path))
+    table.add_row("SHA-256", result.adopted_sha256)
+    table.add_row("Actual codec", quality.codec or "?")
+    table.add_row("Actual quality", "lossless" if quality.lossless is True else "lossy" if quality.lossless is False else "unknown")
+    if quality.bitrate_bps:
+        table.add_row("Actual bitrate", f"{quality.bitrate_bps / 1000:.1f} kbps")
+    if quality.sample_rate_hz:
+        table.add_row("Sample rate", f"{quality.sample_rate_hz} Hz")
+    if quality.channels:
+        table.add_row("Channels", str(quality.channels))
+    table.add_row("Updated report", str(result.report_path))
+
+    console.print(
+        Panel(
+            table,
+            title="[bold green]STAGED SOURCE RESOLVED[/bold green]",
+            border_style="green",
+        )
+    )
+    console.print(
+        Panel(
+            "[bold]Rollback preserved: YES[/bold]\n"
+            "[bold]Final library modified: NO[/bold]\n"
+            "The chosen source is adopted only inside staging.",
+            border_style="cyan",
         )
     )

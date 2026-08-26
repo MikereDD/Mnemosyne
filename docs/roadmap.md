@@ -28,7 +28,9 @@ Initial target: Archive.org.
 - [x] Container/parser fallback codec detection
 - [x] Provenance reduced to weak quality-ranking tie-breaker
 - [x] Repeatable non-overwriting comparison runs
-- [ ] Transactional staged source replacement after comparison
+- [x] Transactional staged source adoption
+- [x] Rollback backup + adoption history
+- [x] Post-adoption hash/codec re-verification
 - [ ] External metadata enrichment
 - [ ] Resume/retry
 - [ ] Metadata normalization/tagging

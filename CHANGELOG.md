@@ -16,10 +16,13 @@ All notable changes to Mnemosyne will be documented in this file.
 - Read-only metadata inspection and proposed metadata diff.
 - Actual codec/quality cross-check and provider mismatch detection.
 - Explicit actual candidate comparison.
-- Parser/container fallback codec recognition for formats such as MP3.
-- Repeatable comparison runs preserved under unique run directories.
+- Parser/container fallback codec recognition and hardened actual-quality ranking.
+- Repeatable comparison evidence runs.
+- Transactional staged source adoption with SHA-256 binding to comparison evidence.
+- Rollback media/report backups and source-adoption history.
+- Post-adoption codec and SHA-256 re-verification.
 
 ### Changed
 
-- Archive original/derivative provenance is now only a weak tie-breaker during actual quality comparison.
-- A materially better derivative can outrank a poor original.
+- Provider quality discrepancies can now be resolved by adopting the latest verified actual-comparison winner.
+- Source adoption remains confined to staging; final-library mutation is still disabled.
