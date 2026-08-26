@@ -1,0 +1,19 @@
+# Mnemosyne example configuration.
+# The live user configuration is created at:
+#   $HOME\Mnemosyne\config\config.toml
+
+[library]
+root = "$HOME\\Downloads\\Mnemosyne"
+audiobooks = "Audiobooks"
+ebooks = "eBooks"
+music = "Music"
+
+[covers]
+enabled = true
+filename = "cover.jpg"
+embed_when_supported = true
+
+[safety]
+confirm_before_apply = true
+overwrite_existing = false
+use_staging = true

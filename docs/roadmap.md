@@ -1,6 +1,6 @@
 # Roadmap
 
-Mnemosyne is currently a concept-stage project.
+Mnemosyne is currently in early development.
 
 ## Phase 0 — Foundation
 
@@ -9,25 +9,35 @@ Mnemosyne is currently a concept-stage project.
 - [x] Define media types
 - [x] Define canonical library layouts
 - [x] Define core workflow
-- [ ] Choose implementation language
-- [ ] Choose CLI/UI approach
-- [ ] Define configuration format
-- [ ] Define provider interface
-- [ ] Define metadata model
+- [x] Choose implementation language — Python 3.12+
+- [x] Choose CLI/UI approach — Typer + Rich, CLI-first with shared interactive layer
+- [x] Define configuration format — TOML
+- [x] Define provider interface — pluggable provider adapters
+- [x] Define metadata model — Pydantic v2 common core + media-specific models
+
+Supporting stack:
+
+- [x] `uv` + `pyproject.toml`
+- [x] Live user config outside the repo at `$HOME\Mnemosyne\config\config.toml`
 
 ## Phase 1 — First provider
 
-Likely initial target: Archive.org.
+Initial target: Archive.org.
 
-- [ ] Item discovery
-- [ ] Metadata retrieval
-- [ ] Format selection
-- [ ] Download planning
+- [x] First real test fixture selected (`animal-farm.sna`)
+- [x] Initial Archive.org URL/identifier discovery
+- [x] Initial metadata retrieval
+- [x] Initial playable-vs-auxiliary file classification
+- [x] Initial audio quality/source ranking
+- [x] Initial plan-only destination naming
+- [x] Initial cover candidate selection
+- [ ] External metadata enrichment
 - [ ] Safe fetching
 - [ ] Resume/retry
 - [ ] Cover retrieval
-- [ ] Destination naming
+- [ ] Final destination placement
 - [ ] Verification
+- [ ] Job ledger/state integration
 
 ## Phase 2 — Media normalization
 
