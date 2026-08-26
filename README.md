@@ -100,6 +100,7 @@ This repository intentionally starts small. Implementation language, CLI framewo
 
 See:
 
+- [`docs/design-foundation.md`](docs/design-foundation.md) — agreed design direction and brainstorm foundation
 - [`docs/architecture.md`](docs/architecture.md)
 - [`docs/library-layout.md`](docs/library-layout.md)
 - [`docs/roadmap.md`](docs/roadmap.md)
