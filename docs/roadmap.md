@@ -31,12 +31,17 @@ Initial target: Archive.org.
 - [x] Initial audio quality/source ranking
 - [x] Initial plan-only destination naming
 - [x] Initial cover candidate selection
+- [x] Safe Fetch v1 — isolated staging download
+- [x] Safe Fetch v1 — expected-size verification
+- [x] Safe Fetch v1 — basic audio signature verification
+- [x] Safe Fetch v1 — SHA-256 recording
+- [x] Safe Fetch v1 — staging provenance report
 - [ ] External metadata enrichment
-- [ ] Safe fetching
 - [ ] Resume/retry
 - [ ] Cover retrieval
+- [ ] Metadata normalization/tagging
 - [ ] Final destination placement
-- [ ] Verification
+- [ ] Final verification
 - [ ] Job ledger/state integration
 
 ## Phase 2 — Media normalization

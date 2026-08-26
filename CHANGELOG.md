@@ -22,7 +22,9 @@ All notable changes to Mnemosyne will be documented in this file.
 - Safe runtime initialization under `$HOME\Mnemosyne`.
 - Plan-only CLI milestone with no media downloads or final-library mutation.
 - Initial provider/path unit tests.
+- Safe Fetch v1 with explicit `--apply`, isolated staging, `.part` downloads, expected-size verification, basic file-signature validation, SHA-256 hashing, and per-job provenance reports.
+- Safe Fetch validation tests for M4A/ISO-BMFF, MP3, invalid signatures, and HTML masquerading as audio.
 
 ### Changed
 
-- Roadmap now marks Phase 0 complete and records the first Phase 1 implementation slice.
+- Roadmap now marks Phase 0 complete and records the active Phase 1 implementation slices.

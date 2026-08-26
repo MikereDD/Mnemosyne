@@ -5,6 +5,7 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
+from .fetcher import FetchResult
 from .models import AcquisitionPlan, CandidateKind
 
 console = Console()
@@ -26,7 +27,7 @@ def render_plan(plan: AcquisitionPlan) -> None:
 
     console.print(
         Panel.fit(
-            "[bold]Mnemosyne[/bold]\n[dim]Archive.org plan-only prototype[/dim]",
+            "[bold]Mnemosyne[/bold]\n[dim]Archive.org acquisition plan[/dim]",
             border_style="cyan",
         )
     )
@@ -103,8 +104,36 @@ def render_plan(plan: AcquisitionPlan) -> None:
 
     console.print(
         Panel(
-            "[bold green]No files were downloaded or modified.[/bold green]\n"
-            "This milestone only discovers, classifies, ranks, and plans.",
+            "[bold green]Plan complete.[/bold green]\n"
+            "The final media library has not been modified.",
             border_style="green",
+        )
+    )
+
+
+def render_fetch_result(result: FetchResult) -> None:
+    table = Table(show_header=False, box=None, pad_edge=False)
+    table.add_column(style="bold")
+    table.add_column()
+    table.add_row("Job", result.job_id)
+    table.add_row("Staging", str(result.staging_dir))
+    table.add_row("Audio", str(result.audio.path))
+    table.add_row("Size", _size(result.audio.actual_size))
+    table.add_row("Signature", result.audio.signature)
+    table.add_row("SHA-256", result.audio.sha256)
+    table.add_row("Report", str(result.report_path))
+
+    console.print(
+        Panel(
+            table,
+            title="[bold green]STAGED + VERIFIED[/bold green]",
+            border_style="green",
+        )
+    )
+    console.print(
+        Panel(
+            "[bold]Final library modified: NO[/bold]\n"
+            "The verified source audio remains isolated in Mnemosyne staging.",
+            border_style="cyan",
         )
     )
