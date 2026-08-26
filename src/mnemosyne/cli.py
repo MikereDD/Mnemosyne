@@ -7,6 +7,8 @@ import typer
 
 from .adoption import AdoptionError, adopt_latest_recommended_source
 from .comparison import ComparisonError, compare_archive_candidates
+from .completion import CompletionError, apply_completion, preview_completion
+from .cleanup import CleanupError, apply_cleanup, preview_cleanup
 from .config import initialize_runtime, load_config, runtime_root
 from .fetcher import FetchError, fetch_plan_to_staging
 from .inspection import InspectionError, inspect_staging_job, latest_staging_job
@@ -14,6 +16,9 @@ from .models import MediaType
 from .planner import build_plan
 from .providers.archive_org import ArchiveOrgProvider
 from .providers.base import ProviderError
+from .prune import PruneError, apply_prune, preview_prune
+from .placement import PlacementError, apply_final_placement, preview_final_placement
+from .readiness import ReadinessError, verify_staged_readiness
 from .render import (
     console,
     render_adoption,
@@ -21,7 +26,19 @@ from .render import (
     render_fetch_result,
     render_inspection,
     render_plan,
+    render_tagging_preview,
+    render_tagging_result,
+    render_readiness,
+    render_placement_preview,
+    render_placement_result,
+    render_completion_preview,
+    render_completion_result,
+    render_cleanup_preview,
+    render_cleanup_result,
+    render_prune_preview,
+    render_prune_result,
 )
+from .tagging import TaggingError, apply_metadata_normalization, preview_metadata_normalization
 
 app = typer.Typer(
     help="Mnemosyne media acquisition and library-normalization pipeline.",
@@ -159,11 +176,7 @@ def adopt_command(
     job: Annotated[Path | None, typer.Argument(help="Staging job directory. Omit to use the most recent completed job.")] = None,
     apply: Annotated[bool, typer.Option("--apply", help="Transactionally adopt the latest comparison winner into the staged canonical slot.")] = False,
 ) -> None:
-    """
-    Adopt the latest verified comparison winner inside staging.
-
-    Without --apply this is preview-only.
-    """
+    """Adopt the latest verified comparison winner inside staging."""
     try:
         job_dir = job if job is not None else latest_staging_job()
     except InspectionError as exc:
@@ -185,6 +198,195 @@ def adopt_command(
         raise typer.Exit(code=10) from exc
 
     render_adoption(result)
+
+
+@app.command("tag")
+def tag_command(
+    job: Annotated[Path | None, typer.Argument(help="Staging job directory. Omit to use the most recent completed job.")] = None,
+    apply: Annotated[bool, typer.Option("--apply", help="Transactionally write canonical metadata and embed verified cover art in staging.")] = False,
+) -> None:
+    """
+    Preview or apply canonical metadata normalization to staged MP4-family audio.
+
+    Without --apply this command is strictly read-only.
+    """
+    try:
+        job_dir = job if job is not None else latest_staging_job()
+        preview = preview_metadata_normalization(job_dir)
+    except (InspectionError, TaggingError) as exc:
+        console.print(f"[bold red]Metadata normalization blocked:[/bold red] {exc}")
+        raise typer.Exit(code=11) from exc
+
+    if not apply:
+        render_tagging_preview(preview)
+        return
+
+    try:
+        result = apply_metadata_normalization(job_dir)
+    except (TaggingError, OSError) as exc:
+        console.print(f"[bold red]Metadata normalization failed:[/bold red] {exc}")
+        raise typer.Exit(code=12) from exc
+
+    render_tagging_result(result)
+
+
+@app.command("ready")
+def ready_command(
+    job: Annotated[Path | None, typer.Argument(help="Staging job directory. Omit to verify the most recent completed job.")] = None,
+) -> None:
+    """
+    Perform the final read-only staged readiness verification.
+
+    This writes only readiness-report.json inside staging and never places media.
+    """
+    try:
+        job_dir = job if job is not None else latest_staging_job()
+        result = verify_staged_readiness(job_dir)
+    except (InspectionError, ReadinessError, OSError) as exc:
+        console.print(f"[bold red]Readiness verification failed:[/bold red] {exc}")
+        raise typer.Exit(code=13) from exc
+
+    render_readiness(result)
+
+    if not result.ready:
+        raise typer.Exit(code=14)
+
+
+@app.command("place")
+def place_command(
+    job: Annotated[Path | None, typer.Argument(help="Staging job directory. Omit to use the most recent completed job.")] = None,
+    apply: Annotated[bool, typer.Option("--apply", help="Transactionally place the certified staged media into the final library.")] = False,
+) -> None:
+    """
+    Preview or transactionally place a readiness-certified staging job.
+
+    Existing destinations are never overwritten or merged.
+    """
+    try:
+        job_dir = job if job is not None else latest_staging_job()
+        preview = preview_final_placement(job_dir)
+    except (InspectionError, PlacementError, OSError) as exc:
+        console.print(f"[bold red]Final placement blocked:[/bold red] {exc}")
+        raise typer.Exit(code=15) from exc
+
+    if not apply:
+        render_placement_preview(preview)
+        return
+
+    try:
+        result = apply_final_placement(job_dir)
+    except (PlacementError, OSError) as exc:
+        console.print(f"[bold red]Final placement failed:[/bold red] {exc}")
+        raise typer.Exit(code=16) from exc
+
+    render_placement_result(result)
+
+
+@app.command("complete")
+def complete_command(
+    job: Annotated[Path | None, typer.Argument(help="Staging job directory. Omit to use the most recent completed placement job.")] = None,
+    apply: Annotated[bool, typer.Option("--apply", help="Mark the fully verified acquisition lifecycle complete while retaining staging evidence.")] = False,
+) -> None:
+    """
+    Preview or certify acquisition completion after verified final placement.
+
+    Completion never deletes staging evidence or prunes fetch-list entries.
+    """
+    try:
+        job_dir = job if job is not None else latest_staging_job()
+        preview = preview_completion(job_dir)
+    except (InspectionError, CompletionError, OSError) as exc:
+        console.print(f"[bold red]Completion blocked:[/bold red] {exc}")
+        raise typer.Exit(code=17) from exc
+
+    if not apply:
+        render_completion_preview(preview)
+        if not preview.ready_to_complete:
+            raise typer.Exit(code=18)
+        return
+
+    try:
+        result = apply_completion(job_dir)
+    except (CompletionError, OSError) as exc:
+        console.print(f"[bold red]Completion failed:[/bold red] {exc}")
+        raise typer.Exit(code=19) from exc
+
+    render_completion_result(result)
+
+
+@app.command("cleanup")
+def cleanup_command(
+    job: Annotated[Path | None, typer.Argument(help="Completed staging job directory. Omit to use the most recent retained staging job.")] = None,
+    apply: Annotated[bool, typer.Option("--apply", help="Archive a durable completion receipt and delete the retained staging job.")] = False,
+    confirm: Annotated[str | None, typer.Option("--confirm", help="Required with --apply. Must exactly match the job ID being deleted.")] = None,
+) -> None:
+    """
+    Preview or explicitly remove a completed staging job.
+
+    Destructive cleanup requires both --apply and an exact --confirm <job-id>.
+    """
+    try:
+        job_dir = job if job is not None else latest_staging_job()
+        preview = preview_cleanup(job_dir)
+    except (InspectionError, CleanupError, OSError) as exc:
+        console.print(f"[bold red]Cleanup blocked:[/bold red] {exc}")
+        raise typer.Exit(code=20) from exc
+
+    if not apply:
+        render_cleanup_preview(preview)
+        return
+
+    if confirm is None:
+        console.print(
+            "[bold red]Cleanup blocked:[/bold red] "
+            "destructive cleanup requires --confirm with the exact job ID."
+        )
+        raise typer.Exit(code=21)
+
+    try:
+        result = apply_cleanup(job_dir, confirm_job_id=confirm)
+    except (CleanupError, OSError) as exc:
+        console.print(f"[bold red]Cleanup failed:[/bold red] {exc}")
+        raise typer.Exit(code=22) from exc
+
+    render_cleanup_result(result)
+
+
+@app.command("prune")
+def prune_command(
+    job_id: Annotated[str, typer.Argument(help="Completed job ID whose exact source URL should be removed from its fetch list.")],
+    apply: Annotated[bool, typer.Option("--apply", help="Atomically remove exact matching active fetch-list entries after backup.")] = False,
+    confirm_url: Annotated[str | None, typer.Option("--confirm-url", help="Required with --apply. Must exactly match the completed source URL.")] = None,
+) -> None:
+    """
+    Preview or explicitly prune a completed source URL from the appropriate fetch list.
+
+    This command never infers near matches and never removes comments or unrelated URLs.
+    """
+    try:
+        preview = preview_prune(job_id)
+    except (PruneError, OSError) as exc:
+        console.print(f"[bold red]Fetch-list pruning blocked:[/bold red] {exc}")
+        raise typer.Exit(code=23) from exc
+
+    if not apply:
+        render_prune_preview(preview)
+        return
+
+    if confirm_url is None:
+        console.print(
+            "[bold red]Fetch-list pruning blocked:[/bold red] "
+            "pruning requires --confirm-url with the exact completed source URL."
+        )
+        raise typer.Exit(code=24)
+
+    try:
+        result = apply_prune(job_id, confirm_url=confirm_url)
+    except (PruneError, OSError) as exc:
+        console.print(f"[bold red]Fetch-list pruning failed:[/bold red] {exc}")
+        raise typer.Exit(code=25) from exc
+
+    render_prune_result(result)
 
 
 if __name__ == "__main__":

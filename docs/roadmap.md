@@ -25,16 +25,25 @@ Initial target: Archive.org.
 - [x] Post-download actual codec/quality inspection
 - [x] Provider quality-claim mismatch detection
 - [x] Explicit actual candidate comparison
-- [x] Container/parser fallback codec detection
-- [x] Provenance reduced to weak quality-ranking tie-breaker
-- [x] Repeatable non-overwriting comparison runs
+- [x] Hardened container/parser codec detection
+- [x] Repeatable comparison evidence
 - [x] Transactional staged source adoption
 - [x] Rollback backup + adoption history
-- [x] Post-adoption hash/codec re-verification
+- [x] Transactional MP4-family metadata normalization
+- [x] Embedded cover verification by SHA-256
+- [x] Post-tag canonical metadata verification
 - [ ] External metadata enrichment
 - [ ] Resume/retry
-- [ ] Metadata normalization/tagging
+- [ ] MP3/FLAC metadata writers
 - [ ] Edition-aware cover validation/scoring
-- [ ] Final destination placement
-- [ ] Final verification
+- [x] Final staged readiness verification
+- [x] Transactional final destination placement
+- [x] Final library hash verification
+- [ ] Existing-destination conflict resolution
+- [x] Final acquisition completion certification
+- [x] Non-destructive staging retention policy v1
+- [x] Durable completed-job receipt archive
+- [x] Explicit strongly-confirmed staging cleanup workflow
+- [x] Explicit fetch-list pruning workflow
+- [x] Atomic fetch-list backup/rewrite verification
 - [ ] Job ledger/state integration

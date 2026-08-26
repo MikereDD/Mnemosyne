@@ -7,9 +7,15 @@ from rich.text import Text
 
 from .adoption import AdoptionResult
 from .comparison import ComparisonResult
+from .completion import CompletionPreview, CompletionResult
+from .cleanup import CleanupPreview, CleanupResult
 from .fetcher import FetchResult
 from .inspection import MetadataInspection
 from .models import AcquisitionPlan, CandidateKind
+from .placement import PlacementPreview, PlacementResult
+from .readiness import ReadinessResult
+from .prune import PrunePreview, PruneResult
+from .tagging import TaggingPreview, TaggingResult
 
 console = Console()
 
@@ -226,18 +232,401 @@ def render_adoption(result: AdoptionResult) -> None:
         table.add_row("Channels", str(quality.channels))
     table.add_row("Updated report", str(result.report_path))
 
+    console.print(Panel(table, title="[bold green]STAGED SOURCE RESOLVED[/bold green]", border_style="green"))
+    console.print(Panel("[bold]Rollback preserved: YES[/bold]\n[bold]Final library modified: NO[/bold]\nThe chosen source is adopted only inside staging.", border_style="cyan"))
+
+
+def render_tagging_preview(preview: TaggingPreview) -> None:
+    console.print(Panel.fit("[bold]Mnemosyne[/bold]\n[dim]Transactional metadata normalization preview[/dim]", border_style="cyan"))
+
+    summary = Table(show_header=False, box=None, pad_edge=False)
+    summary.add_column(style="bold")
+    summary.add_column()
+    summary.add_row("Audio", str(preview.audio_path))
+    summary.add_row("Cover", str(preview.cover_path) if preview.cover_path else "[yellow]none[/yellow]")
+    console.print(summary)
+
+    table = Table(title="Canonical metadata to write")
+    table.add_column("Field")
+    table.add_column("Value")
+    for key, value in preview.proposed_tags.items():
+        table.add_row(key, value)
+    console.print(table)
+
+    console.print(
+        Panel(
+            "[bold yellow]Preview only.[/bold yellow]\n"
+            "No tags, artwork, staged media, rollback data, or final-library files were changed.\n"
+            "Re-run with [bold]--apply[/bold] to perform the transactional staged mutation.",
+            border_style="yellow",
+        )
+    )
+
+
+def render_tagging_result(result: TaggingResult) -> None:
+    table = Table(show_header=False, box=None, pad_edge=False)
+    table.add_column(style="bold")
+    table.add_column()
+    table.add_row("Staged audio", str(result.audio_path))
+    table.add_row("Rollback audio", str(result.rollback_path))
+    table.add_row("Pre-tag SHA-256", result.pre_tag_sha256)
+    table.add_row("Post-tag SHA-256", result.post_tag_sha256)
+    table.add_row("Embedded cover", "YES" if result.embedded_cover else "NO")
+    if result.embedded_cover_sha256:
+        table.add_row("Cover SHA-256", result.embedded_cover_sha256)
+    table.add_row("Updated report", str(result.report_path))
+
     console.print(
         Panel(
             table,
-            title="[bold green]STAGED SOURCE RESOLVED[/bold green]",
+            title="[bold green]METADATA NORMALIZED + VERIFIED[/bold green]",
             border_style="green",
         )
     )
+
+    tags = Table(title="Verified canonical metadata")
+    tags.add_column("Field")
+    tags.add_column("Value")
+    for key, value in result.written_tags.items():
+        tags.add_row(key, value)
+    console.print(tags)
+
     console.print(
         Panel(
             "[bold]Rollback preserved: YES[/bold]\n"
+            "[bold]Post-write verification: PASSED[/bold]\n"
             "[bold]Final library modified: NO[/bold]\n"
-            "The chosen source is adopted only inside staging.",
+            "The normalized media remains isolated in Mnemosyne staging.",
             border_style="cyan",
+        )
+    )
+
+
+
+def render_readiness(result: ReadinessResult) -> None:
+    console.print(
+        Panel.fit(
+            "[bold]Mnemosyne[/bold]\n[dim]Final staged readiness verification[/dim]",
+            border_style="cyan",
+        )
+    )
+
+    table = Table(title="Readiness checks")
+    table.add_column("Result")
+    table.add_column("Check")
+    table.add_column("Detail")
+
+    for check in result.checks:
+        table.add_row(
+            "[green]PASS[/green]" if check.passed else "[red]FAIL[/red]",
+            check.name,
+            check.detail,
+        )
+
+    console.print(table)
+
+    quality = result.actual_quality
+    summary = Table(show_header=False, box=None, pad_edge=False)
+    summary.add_column(style="bold")
+    summary.add_column()
+    summary.add_row("Audio", str(result.audio_path))
+    summary.add_row("Audio SHA-256", result.audio_sha256)
+    summary.add_row("Cover", str(result.cover_path) if result.cover_path else "missing")
+    summary.add_row("Cover SHA-256", result.cover_sha256 or "missing")
+    summary.add_row("Actual codec", quality.codec or "?")
+    summary.add_row(
+        "Actual quality",
+        "lossless" if quality.lossless is True else "lossy" if quality.lossless is False else "unknown",
+    )
+    summary.add_row("Readiness report", str(result.readiness_report_path))
+    console.print(summary)
+
+    if result.ready:
+        console.print(
+            Panel(
+                "[bold green]READY FOR PLACEMENT[/bold green]\n"
+                "Every current staging gate passed.\n"
+                "[bold]Final library modified: NO[/bold]\n"
+                "A separate explicit placement transaction is still required.",
+                border_style="green",
+            )
+        )
+    else:
+        console.print(
+            Panel(
+                "[bold red]NOT READY FOR PLACEMENT[/bold red]\n"
+                "One or more staging gates failed.\n"
+                "[bold]Final library modified: NO[/bold]",
+                border_style="red",
+            )
+        )
+
+
+
+def render_placement_preview(preview: PlacementPreview) -> None:
+    console.print(
+        Panel.fit(
+            "[bold]Mnemosyne[/bold]\n[dim]Transactional final-library placement preview[/dim]",
+            border_style="cyan",
+        )
+    )
+
+    table = Table(show_header=False, box=None, pad_edge=False)
+    table.add_column(style="bold")
+    table.add_column()
+    table.add_row("Destination", str(preview.destination))
+    table.add_row("Audio source", str(preview.audio_source))
+    table.add_row("Audio destination", str(preview.audio_destination))
+    table.add_row("Audio SHA-256", preview.audio_sha256)
+    table.add_row("Cover source", str(preview.cover_source))
+    table.add_row("Cover destination", str(preview.cover_destination))
+    table.add_row("Cover SHA-256", preview.cover_sha256)
+    console.print(table)
+
+    console.print(
+        Panel(
+            "[bold yellow]Preview only.[/bold yellow]\n"
+            "Readiness certification and staged hashes were revalidated.\n"
+            "No final-library directories or files were created.\n"
+            "Existing destinations will never be overwritten or merged.\n"
+            "Re-run with [bold]--apply[/bold] to perform the transaction.",
+            border_style="yellow",
+        )
+    )
+
+
+def render_placement_result(result: PlacementResult) -> None:
+    table = Table(show_header=False, box=None, pad_edge=False)
+    table.add_column(style="bold")
+    table.add_column()
+    table.add_row("Final destination", str(result.destination))
+    table.add_row("Audio", str(result.audio_path))
+    table.add_row("Audio SHA-256", result.audio_sha256)
+    table.add_row("Cover", str(result.cover_path))
+    table.add_row("Cover SHA-256", result.cover_sha256)
+    table.add_row("Placement report", str(result.placement_report_path))
+    table.add_row("Updated fetch report", str(result.fetch_report_path))
+
+    console.print(
+        Panel(
+            table,
+            title="[bold green]PLACED + VERIFIED[/bold green]",
+            border_style="green",
+        )
+    )
+
+    console.print(
+        Panel(
+            "[bold green]Final library modified: YES[/bold green]\n"
+            "No existing destination was overwritten.\n"
+            "Pre-commit copy verification: PASSED\n"
+            "Post-placement verification: PASSED\n"
+            "The staged acquisition remains available as provenance and rollback evidence.",
+            border_style="green",
+        )
+    )
+
+
+
+def render_completion_preview(preview: CompletionPreview) -> None:
+    console.print(
+        Panel.fit(
+            "[bold]Mnemosyne[/bold]\n[dim]Final acquisition completion preview[/dim]",
+            border_style="cyan",
+        )
+    )
+
+    table = Table(title="Completion checks")
+    table.add_column("Result")
+    table.add_column("Check")
+    table.add_column("Detail")
+
+    for check in preview.checks:
+        table.add_row(
+            "[green]PASS[/green]" if check.passed else "[red]FAIL[/red]",
+            check.name,
+            check.detail,
+        )
+
+    console.print(table)
+
+    console.print(
+        Panel(
+            (
+                "[bold green]READY TO COMPLETE[/bold green]\n"
+                if preview.ready_to_complete
+                else "[bold red]NOT READY TO COMPLETE[/bold red]\n"
+            )
+            + "[bold]Preview only.[/bold]\n"
+            "No staging evidence was deleted.\n"
+            "No fetch-list entry was pruned.\n"
+            "No final-library media was modified.",
+            border_style="green" if preview.ready_to_complete else "red",
+        )
+    )
+
+
+def render_completion_result(result: CompletionResult) -> None:
+    table = Table(show_header=False, box=None, pad_edge=False)
+    table.add_column(style="bold")
+    table.add_column()
+    table.add_row("Completed at", result.completed_at)
+    table.add_row("Destination", str(result.destination))
+    table.add_row("Audio", str(result.audio_path))
+    table.add_row("Cover", str(result.cover_path))
+    table.add_row("Completion report", str(result.completion_report_path))
+    table.add_row("Updated fetch report", str(result.fetch_report_path))
+    table.add_row("Staging retained", "YES")
+    table.add_row("Fetch list pruned", "NO")
+
+    console.print(
+        Panel(
+            table,
+            title="[bold green]ACQUISITION COMPLETE[/bold green]",
+            border_style="green",
+        )
+    )
+
+    console.print(
+        Panel(
+            "[bold]Final library verification: PASSED[/bold]\n"
+            "[bold]Lifecycle status: COMPLETE[/bold]\n"
+            "Staging/provenance remains retained.\n"
+            "Cleanup and fetch-list pruning require separate explicit operations.",
+            border_style="green",
+        )
+    )
+
+
+
+def render_cleanup_preview(preview: CleanupPreview) -> None:
+    console.print(
+        Panel.fit(
+            "[bold]Mnemosyne[/bold]\n[dim]Completed staging cleanup preview[/dim]",
+            border_style="cyan",
+        )
+    )
+
+    table = Table(show_header=False, box=None, pad_edge=False)
+    table.add_column(style="bold")
+    table.add_column()
+    table.add_row("Job ID", preview.job_id)
+    table.add_row("Staging job", str(preview.job_dir))
+    table.add_row("Final destination", str(preview.final_destination))
+    table.add_row("Durable receipt", str(preview.receipt_path))
+    table.add_row("Staging files", str(preview.file_count))
+    table.add_row("Staging size", _size(preview.staging_size_bytes))
+    console.print(table)
+
+    console.print(
+        Panel(
+            "[bold yellow]Preview only.[/bold yellow]\n"
+            "Final audio and cover hashes were reverified.\n"
+            "No staging evidence was deleted.\n"
+            "No fetch-list entry was pruned.\n\n"
+            "Deletion requires both:\n"
+            "[bold]--apply[/bold]\n"
+            f"[bold]--confirm {preview.job_id}[/bold]",
+            border_style="yellow",
+        )
+    )
+
+
+def render_cleanup_result(result: CleanupResult) -> None:
+    table = Table(show_header=False, box=None, pad_edge=False)
+    table.add_column(style="bold")
+    table.add_column()
+    table.add_row("Job ID", result.job_id)
+    table.add_row("Removed staging", str(result.removed_job_dir))
+    table.add_row("Archived receipt", str(result.receipt_path))
+    table.add_row("Final destination", str(result.final_destination))
+    table.add_row("Final audio SHA-256", result.final_audio_sha256)
+    table.add_row("Final cover SHA-256", result.final_cover_sha256)
+    table.add_row("Removed files", str(result.file_count))
+    table.add_row("Removed size", _size(result.staging_size_bytes))
+    table.add_row("Fetch list pruned", "NO")
+
+    console.print(
+        Panel(
+            table,
+            title="[bold green]COMPLETED STAGING CLEANED[/bold green]",
+            border_style="green",
+        )
+    )
+
+    console.print(
+        Panel(
+            "[bold]Durable completion receipt: VERIFIED[/bold]\n"
+            "[bold]Final library media: UNCHANGED + VERIFIED[/bold]\n"
+            "[bold]Retained staging job: REMOVED[/bold]\n"
+            "Fetch-list pruning remains a separate explicit workflow.",
+            border_style="green",
+        )
+    )
+
+
+
+def render_prune_preview(preview: PrunePreview) -> None:
+    console.print(
+        Panel.fit(
+            "[bold]Mnemosyne[/bold]\n[dim]Fetch-list pruning preview[/dim]",
+            border_style="cyan",
+        )
+    )
+
+    table = Table(show_header=False, box=None, pad_edge=False)
+    table.add_column(style="bold")
+    table.add_column()
+    table.add_row("Job ID", preview.job_id)
+    table.add_row("Media type", preview.media_type)
+    table.add_row("Source URL", preview.source_url)
+    table.add_row("Fetch list", str(preview.list_path))
+    table.add_row(
+        "Exact matching lines",
+        ", ".join(str(line) for line in preview.matching_lines),
+    )
+    table.add_row("Backup path", str(preview.backup_path))
+    console.print(table)
+
+    console.print(
+        Panel(
+            "[bold yellow]Preview only.[/bold yellow]\n"
+            "No fetch-list entry was removed.\n"
+            "No backup was created.\n"
+            "Only exact active URL matches are eligible.\n\n"
+            "Apply requires:\n"
+            f"[bold]--apply --confirm-url \"{preview.source_url}\"[/bold]",
+            border_style="yellow",
+        )
+    )
+
+
+def render_prune_result(result: PruneResult) -> None:
+    table = Table(show_header=False, box=None, pad_edge=False)
+    table.add_column(style="bold")
+    table.add_column()
+    table.add_row("Job ID", result.job_id)
+    table.add_row("Source URL", result.source_url)
+    table.add_row("Fetch list", str(result.list_path))
+    table.add_row("Backup", str(result.backup_path))
+    table.add_row("Entries removed", str(result.removed_count))
+    table.add_row("Remaining lines", str(result.remaining_lines))
+    table.add_row("Updated receipt", str(result.receipt_path))
+
+    console.print(
+        Panel(
+            table,
+            title="[bold green]FETCH LIST PRUNED + VERIFIED[/bold green]",
+            border_style="green",
+        )
+    )
+
+    console.print(
+        Panel(
+            "[bold]Pre-mutation backup: VERIFIED[/bold]\n"
+            "[bold]Atomic rewrite: PASSED[/bold]\n"
+            "[bold]Post-rewrite exact-match check: PASSED[/bold]\n"
+            "Final-library media was not modified.",
+            border_style="green",
         )
     )
