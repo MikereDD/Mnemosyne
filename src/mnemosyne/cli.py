@@ -1,16 +1,25 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Annotated
 
 import typer
 
+from .comparison import ComparisonError, compare_archive_candidates
 from .config import initialize_runtime, load_config, runtime_root
 from .fetcher import FetchError, fetch_plan_to_staging
+from .inspection import InspectionError, inspect_staging_job, latest_staging_job
 from .models import MediaType
 from .planner import build_plan
 from .providers.archive_org import ArchiveOrgProvider
 from .providers.base import ProviderError
-from .render import console, render_fetch_result, render_plan
+from .render import (
+    console,
+    render_comparison,
+    render_fetch_result,
+    render_inspection,
+    render_plan,
+)
 
 app = typer.Typer(
     help="Mnemosyne media acquisition and library-normalization pipeline.",
@@ -156,6 +165,70 @@ def fetch(
         raise typer.Exit(code=5) from exc
 
     render_fetch_result(result)
+
+
+@app.command("inspect")
+def inspect_command(
+    job: Annotated[
+        Path | None,
+        typer.Argument(
+            help="Staging job directory. Omit to inspect the most recent completed job."
+        ),
+    ] = None,
+) -> None:
+    """Inspect staged audio properties/tags and preview canonical metadata. Read-only."""
+    try:
+        job_dir = job if job is not None else latest_staging_job()
+        result = inspect_staging_job(job_dir)
+    except InspectionError as exc:
+        console.print(f"[bold red]Inspection failed:[/bold red] {exc}")
+        raise typer.Exit(code=6) from exc
+
+    render_inspection(result)
+
+
+@app.command("compare")
+def compare_command(
+    job: Annotated[
+        Path | None,
+        typer.Argument(
+            help="Staging job directory. Omit to compare the most recent completed job."
+        ),
+    ] = None,
+    apply: Annotated[
+        bool,
+        typer.Option(
+            "--apply",
+            help="Download playable alternatives into the staging job for actual comparison.",
+        ),
+    ] = False,
+) -> None:
+    """
+    Compare Archive audio candidates using actual downloaded codec/bitrate properties.
+
+    Without --apply, this command does not download alternatives.
+    """
+    try:
+        job_dir = job if job is not None else latest_staging_job()
+    except InspectionError as exc:
+        console.print(f"[bold red]Comparison failed:[/bold red] {exc}")
+        raise typer.Exit(code=7) from exc
+
+    if not apply:
+        console.print(
+            f"[bold]Comparison target:[/bold] {job_dir}\n"
+            "[yellow]No alternatives downloaded.[/yellow] "
+            "Re-run with [bold]--apply[/bold] to compare actual media."
+        )
+        return
+
+    try:
+        result = compare_archive_candidates(job_dir)
+    except (ComparisonError, FetchError, OSError) as exc:
+        console.print(f"[bold red]Comparison failed:[/bold red] {exc}")
+        raise typer.Exit(code=8) from exc
+
+    render_comparison(result)
 
 
 if __name__ == "__main__":

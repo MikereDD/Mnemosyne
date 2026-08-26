@@ -13,6 +13,7 @@ import httpx
 
 from .models import AcquisitionPlan, MediaCandidate
 from .paths import sanitize_component
+from .quality import inspect_actual_quality, provider_quality_mismatch
 
 
 class FetchError(RuntimeError):
@@ -26,6 +27,12 @@ class StagedFile:
     actual_size: int
     sha256: str
     signature: str
+    actual_codec: str | None
+    actual_lossless: bool | None
+    bitrate_bps: int | None
+    sample_rate_hz: int | None
+    channels: int | None
+    quality_warning: str | None
 
 
 @dataclass(frozen=True)
@@ -46,6 +53,7 @@ class FetchResult:
     audio: StagedFile
     cover: StagedCover | None
     report_path: Path
+    warnings: tuple[str, ...]
 
 
 _AUDIO_SIGNATURES = {
@@ -110,31 +118,26 @@ def _jpeg_dimensions(path: Path) -> tuple[int | None, int | None]:
     with path.open("rb") as stream:
         if stream.read(2) != b"\xff\xd8":
             return None, None
-
         while True:
             marker_start = stream.read(1)
             if not marker_start:
                 return None, None
             if marker_start != b"\xff":
                 continue
-
             marker = stream.read(1)
             while marker == b"\xff":
                 marker = stream.read(1)
             if not marker:
                 return None, None
-
             marker_code = marker[0]
             if marker_code in {0xD8, 0xD9}:
                 continue
-
             length_bytes = stream.read(2)
             if len(length_bytes) != 2:
                 return None, None
             segment_length = struct.unpack(">H", length_bytes)[0]
             if segment_length < 2:
                 return None, None
-
             if marker_code in {
                 0xC0, 0xC1, 0xC2, 0xC3,
                 0xC5, 0xC6, 0xC7,
@@ -147,7 +150,6 @@ def _jpeg_dimensions(path: Path) -> tuple[int | None, int | None]:
                     return None, None
                 height, width = struct.unpack(">HH", dimensions)
                 return width, height
-
             stream.seek(segment_length - 2, 1)
 
 
@@ -164,13 +166,11 @@ def _webp_dimensions(path: Path) -> tuple[int | None, int | None]:
     data = path.read_bytes()[:64]
     if len(data) < 30 or data[:4] != b"RIFF" or data[8:12] != b"WEBP":
         return None, None
-
     chunk = data[12:16]
     if chunk == b"VP8X" and len(data) >= 30:
         width = 1 + int.from_bytes(data[24:27], "little")
         height = 1 + int.from_bytes(data[27:30], "little")
         return width, height
-
     return None, None
 
 
@@ -269,15 +269,14 @@ def _download_audio(
     *,
     timeout: float,
 ) -> StagedFile:
-    source_name = Path(candidate.name).name
-    source_path = job_dir / source_name
+    source_path = job_dir / Path(candidate.name).name
 
     actual_size, sha256 = _stream_download(
         candidate.url,
         source_path,
         expected_size=candidate.size,
         timeout=timeout,
-        user_agent="Mnemosyne/0.1.0-dev.3",
+        user_agent="Mnemosyne/0.1.0-dev.4",
     )
 
     part_path = source_path.with_name(source_path.name + ".part")
@@ -290,12 +289,24 @@ def _download_audio(
 
     os.replace(part_path, canonical_path)
 
+    actual = inspect_actual_quality(canonical_path)
+    quality_warning = provider_quality_mismatch(
+        provider_claimed_lossless=candidate.lossless,
+        actual=actual,
+    )
+
     return StagedFile(
         path=canonical_path,
         expected_size=candidate.size,
         actual_size=actual_size,
         sha256=sha256,
         signature=signature,
+        actual_codec=actual.codec,
+        actual_lossless=actual.lossless,
+        bitrate_bps=actual.bitrate_bps,
+        sample_rate_hz=actual.sample_rate_hz,
+        channels=actual.channels,
+        quality_warning=quality_warning,
     )
 
 
@@ -313,14 +324,12 @@ def _download_cover(
         temp_destination,
         expected_size=candidate.size,
         timeout=timeout,
-        user_agent="Mnemosyne/0.1.0-dev.3",
+        user_agent="Mnemosyne/0.1.0-dev.4",
     )
 
     part_path = temp_destination.with_name(temp_destination.name + ".part")
     signature, width, height = _validate_cover(part_path, extension)
 
-    # Canonical standalone artwork is always named cover.jpg when the source is JPEG.
-    # PNG/WebP remain their native extension until a future image-normalization slice.
     canonical_extension = ".jpg" if extension in {".jpg", ".jpeg"} else extension
     canonical_path = job_dir / f"cover{canonical_extension}"
     if canonical_path.exists():
@@ -368,10 +377,18 @@ def fetch_plan_to_staging(
         if plan.selected_cover is not None:
             cover = _download_cover(plan.selected_cover, job_dir, timeout=timeout)
 
+        warnings = tuple(
+            warning
+            for warning in (audio.quality_warning,)
+            if warning is not None
+        )
+
+        status = "needs-attention" if warnings else "staged-normalized"
+
         report = {
-            "schemaVersion": 2,
+            "schemaVersion": 3,
             "jobId": job_id,
-            "status": "staged-normalized",
+            "status": status,
             "createdAt": datetime.now(timezone.utc).isoformat(),
             "source": {
                 "provider": "Internet Archive",
@@ -390,10 +407,16 @@ def fetch_plan_to_staging(
                 "sourceUrl": candidate.url,
                 "archiveFormat": candidate.archive_format,
                 "archiveSource": candidate.source,
+                "providerClaimedLossless": candidate.lossless,
                 "expectedSize": candidate.size,
                 "actualSize": audio.actual_size,
                 "sha256": audio.sha256,
                 "signature": audio.signature,
+                "actualCodec": audio.actual_codec,
+                "actualLossless": audio.actual_lossless,
+                "actualBitrateBps": audio.bitrate_bps,
+                "actualSampleRateHz": audio.sample_rate_hz,
+                "actualChannels": audio.channels,
                 "canonicalStagedName": audio.path.name,
                 "stagedPath": str(audio.path),
             },
@@ -413,6 +436,7 @@ def fetch_plan_to_staging(
                 if cover is not None and plan.selected_cover is not None
                 else None
             ),
+            "warnings": list(warnings),
             "finalLibraryModified": False,
         }
 
@@ -428,10 +452,9 @@ def fetch_plan_to_staging(
             audio=audio,
             cover=cover,
             report_path=report_path,
+            warnings=warnings,
         )
     except Exception:
-        # Keep any verified artifacts for inspection if a later staging step fails.
-        # The job will not contain a success report unless the whole staging slice passed.
         try:
             if job_dir.exists() and not any(job_dir.iterdir()):
                 job_dir.rmdir()
