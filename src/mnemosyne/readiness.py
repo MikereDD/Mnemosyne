@@ -1,376 +1,79 @@
 from __future__ import annotations
-
-import hashlib
-import json
-from dataclasses import dataclass, field
+import hashlib,json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-
-from mutagen.mp4 import MP4
-
 from .inspection import _proposed_tags
+from .metadata_io import MetadataIOError, verify_metadata
 from .quality import ActualAudioQuality, inspect_actual_quality
 
-
-class ReadinessError(RuntimeError):
-    """Final staged readiness verification could not be completed."""
-
-
+class ReadinessError(RuntimeError): pass
 @dataclass(frozen=True)
-class ReadinessCheck:
-    name: str
-    passed: bool
-    detail: str
-
-
+class ReadinessCheck: name:str; passed:bool; detail:str
 @dataclass(frozen=True)
 class ReadinessResult:
-    job_dir: Path
-    ready: bool
-    audio_path: Path
-    cover_path: Path | None
-    checks: tuple[ReadinessCheck, ...]
-    actual_quality: ActualAudioQuality
-    audio_sha256: str
-    cover_sha256: str | None
-    report_path: Path
-    readiness_report_path: Path
+    job_dir:Path;ready:bool;audio_path:Path;cover_path:Path|None;checks:tuple[ReadinessCheck,...]
+    actual_quality:ActualAudioQuality;audio_sha256:str;cover_sha256:str|None;report_path:Path;readiness_report_path:Path
 
-
-_MP4_TAG_MAP = {
-    "title": "\xa9nam",
-    "artist": "\xa9ART",
-    "album_artist": "aART",
-    "album": "\xa9alb",
-    "date": "\xa9day",
-    "genre": "\xa9gen",
-}
-
-
-def _read_json(path: Path) -> dict[str, Any]:
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise ReadinessError(f"Could not read JSON report {path}: {exc}") from exc
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        while True:
-            chunk = stream.read(1024 * 1024)
-            if not chunk:
-                break
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def _resolve_audio(job_dir: Path, report: dict[str, Any]) -> Path:
-    audio = report.get("audio") or {}
-    staged_path = audio.get("stagedPath")
-    if staged_path:
-        path = Path(str(staged_path))
-        if path.is_file():
-            return path
-
-    name = audio.get("canonicalStagedName")
-    if name:
-        path = job_dir / str(name)
-        if path.is_file():
-            return path
-
+def _read_json(p):
+    try:return json.loads(p.read_text(encoding="utf-8"))
+    except Exception as exc:raise ReadinessError(f"Could not read JSON report {p}: {exc}") from exc
+def _sha(p):
+    d=hashlib.sha256()
+    with p.open("rb") as f:
+        for c in iter(lambda:f.read(1024*1024),b""):d.update(c)
+    return d.hexdigest()
+def _audio(job,r):
+    a=r.get("audio") or {}
+    if a.get("stagedPath") and Path(str(a["stagedPath"])).is_file():return Path(str(a["stagedPath"]))
+    if a.get("canonicalStagedName") and (job/str(a["canonicalStagedName"])).is_file():return job/str(a["canonicalStagedName"])
     raise ReadinessError("Could not resolve the staged canonical audio file.")
-
-
-def _resolve_cover(job_dir: Path, report: dict[str, Any]) -> Path | None:
-    cover = report.get("cover") or {}
-    staged_path = cover.get("stagedPath")
-    if staged_path:
-        path = Path(str(staged_path))
-        if path.is_file():
-            return path
-
-    name = cover.get("canonicalStagedName")
-    if name:
-        path = job_dir / str(name)
-        if path.is_file():
-            return path
-
-    for filename in ("cover.jpg", "cover.jpeg", "cover.png"):
-        path = job_dir / filename
-        if path.is_file():
-            return path
-
+def _cover(job,r):
+    c=r.get("cover") or {}
+    if c.get("stagedPath") and Path(str(c["stagedPath"])).is_file():return Path(str(c["stagedPath"]))
+    if c.get("canonicalStagedName") and (job/str(c["canonicalStagedName"])).is_file():return job/str(c["canonicalStagedName"])
+    for n in ("cover.jpg","cover.jpeg","cover.png","cover.webp"):
+        p=job/n
+        if p.is_file():return p
     return None
 
-
-def _verify_mp4_tags_and_cover(
-    audio_path: Path,
-    proposed_tags: dict[str, str],
-    expected_cover_sha256: str | None,
-) -> list[ReadinessCheck]:
-    checks: list[ReadinessCheck] = []
-
-    try:
-        audio = MP4(audio_path)
-    except Exception as exc:
-        return [
-            ReadinessCheck(
-                "container-readable",
-                False,
-                f"Mutagen could not reopen the staged MP4-family audio: {exc}",
-            )
-        ]
-
-    checks.append(
-        ReadinessCheck(
-            "container-readable",
-            True,
-            "Staged MP4-family audio reopened successfully.",
-        )
-    )
-
-    tags = audio.tags or {}
-    for friendly, expected in proposed_tags.items():
-        atom = _MP4_TAG_MAP.get(friendly)
-        if atom is None:
-            continue
-
-        values = tags.get(atom)
-        actual = str(values[0]) if values else None
-        checks.append(
-            ReadinessCheck(
-                f"metadata-{friendly}",
-                actual == expected,
-                (
-                    f"{friendly}={actual!r}"
-                    if actual == expected
-                    else f"Expected {friendly}={expected!r}, found {actual!r}."
-                ),
-            )
-        )
-
-    covers = tags.get("covr") or []
-    if expected_cover_sha256 is None:
-        checks.append(
-            ReadinessCheck(
-                "embedded-cover",
-                bool(covers),
-                (
-                    "Embedded artwork is present."
-                    if covers
-                    else "No expected cover hash was recorded and no embedded artwork is present."
-                ),
-            )
-        )
-    else:
-        if not covers:
-            checks.append(
-                ReadinessCheck(
-                    "embedded-cover",
-                    False,
-                    "Expected embedded artwork is missing.",
-                )
-            )
-        else:
-            actual_cover_sha = hashlib.sha256(bytes(covers[0])).hexdigest()
-            checks.append(
-                ReadinessCheck(
-                    "embedded-cover",
-                    actual_cover_sha == expected_cover_sha256,
-                    (
-                        f"Embedded artwork SHA-256 verified: {actual_cover_sha}"
-                        if actual_cover_sha == expected_cover_sha256
-                        else (
-                            "Embedded artwork SHA-256 mismatch: "
-                            f"expected {expected_cover_sha256}, found {actual_cover_sha}."
-                        )
-                    ),
-                )
-            )
-
+def _metadata_checks(path,tags,cover_sha):
+    try:s=verify_metadata(path,tags,expected_cover_sha256=cover_sha)
+    except MetadataIOError as exc:return [ReadinessCheck("metadata-container-readable",False,str(exc))]
+    checks=[ReadinessCheck("metadata-container-readable",True,f"Metadata family {s.family} reopened successfully.")]
+    for k,e in tags.items():
+        vals=s.tags.get(k);a=vals[0] if vals else None
+        checks.append(ReadinessCheck(f"metadata-{k}",a==e,f"{k}={a!r}" if a==e else f"Expected {k}={e!r}, found {a!r}."))
+    hashes={hashlib.sha256(d).hexdigest() for _,d in s.artwork}
+    checks.append(ReadinessCheck("embedded-cover",cover_sha in hashes if cover_sha else bool(s.artwork),
+        f"Embedded artwork SHA-256 verified: {cover_sha}" if cover_sha and cover_sha in hashes else ("Embedded artwork is present." if not cover_sha and s.artwork else "Embedded artwork verification failed.")))
     return checks
 
-
-def verify_staged_readiness(job_dir: Path) -> ReadinessResult:
-    job_dir = job_dir.resolve()
-    if not job_dir.is_dir():
-        raise ReadinessError(f"Staging job directory does not exist: {job_dir}")
-
-    report_path = job_dir / "fetch-report.json"
-    if not report_path.is_file():
-        raise ReadinessError(f"fetch-report.json not found: {report_path}")
-
-    report = _read_json(report_path)
-    audio_path = _resolve_audio(job_dir, report)
-    cover_path = _resolve_cover(job_dir, report)
-
-    checks: list[ReadinessCheck] = []
-
-    warnings = report.get("warnings") or []
-    checks.append(
-        ReadinessCheck(
-            "warnings-cleared",
-            not warnings,
-            "No unresolved staging warnings." if not warnings else f"Unresolved warnings: {warnings}",
-        )
-    )
-
-    source_resolution = report.get("sourceResolution") or {}
-    source_resolved = source_resolution.get("status") == "resolved-by-actual-comparison"
-    checks.append(
-        ReadinessCheck(
-            "source-resolved",
-            source_resolved,
-            (
-                "Source quality decision was resolved by actual candidate comparison."
-                if source_resolved
-                else "Source quality decision has not been formally resolved."
-            ),
-        )
-    )
-
-    audio_sha = _sha256(audio_path)
-    recorded_audio_sha = str((report.get("audio") or {}).get("sha256") or "")
-    checks.append(
-        ReadinessCheck(
-            "audio-sha256",
-            bool(recorded_audio_sha) and audio_sha == recorded_audio_sha,
-            (
-                f"Audio SHA-256 verified: {audio_sha}"
-                if recorded_audio_sha and audio_sha == recorded_audio_sha
-                else f"Audio SHA-256 mismatch or missing report value; actual={audio_sha}."
-            ),
-        )
-    )
-
-    metadata = report.get("metadataNormalization") or {}
-    metadata_verified = metadata.get("status") == "verified"
-    checks.append(
-        ReadinessCheck(
-            "metadata-normalization",
-            metadata_verified,
-            (
-                "Metadata normalization report is verified."
-                if metadata_verified
-                else "Metadata normalization has not reached verified state."
-            ),
-        )
-    )
-
-    expected_cover_sha = metadata.get("embeddedCoverSha256")
-    cover_sha: str | None = None
-    if cover_path is not None:
-        cover_sha = _sha256(cover_path)
-        recorded_standalone_cover_sha = str((report.get("cover") or {}).get("sha256") or "")
-        checks.append(
-            ReadinessCheck(
-                "standalone-cover-sha256",
-                bool(recorded_standalone_cover_sha) and cover_sha == recorded_standalone_cover_sha,
-                (
-                    f"Standalone cover SHA-256 verified: {cover_sha}"
-                    if recorded_standalone_cover_sha and cover_sha == recorded_standalone_cover_sha
-                    else (
-                        "Standalone cover SHA-256 mismatch or missing report value; "
-                        f"actual={cover_sha}."
-                    )
-                ),
-            )
-        )
-    else:
-        checks.append(
-            ReadinessCheck(
-                "standalone-cover-sha256",
-                False,
-                "Canonical standalone cover is missing.",
-            )
-        )
-
-    proposed = _proposed_tags(report)
-    checks.extend(_verify_mp4_tags_and_cover(audio_path, proposed, expected_cover_sha))
-
-    actual_quality = inspect_actual_quality(audio_path)
-    checks.append(
-        ReadinessCheck(
-            "actual-codec-known",
-            actual_quality.codec is not None and actual_quality.lossless is not None,
-            (
-                f"Actual codec={actual_quality.codec}, "
-                f"quality={'lossless' if actual_quality.lossless else 'lossy'}."
-                if actual_quality.codec is not None and actual_quality.lossless is not None
-                else "Actual codec/quality classification is incomplete."
-            ),
-        )
-    )
-
-    planned_destination = report.get("plannedDestination")
-    checks.append(
-        ReadinessCheck(
-            "planned-destination",
-            bool(planned_destination),
-            (
-                f"Planned destination recorded: {planned_destination}"
-                if planned_destination
-                else "Planned final destination is missing."
-            ),
-        )
-    )
-
-    final_library_modified = bool(report.get("finalLibraryModified"))
-    checks.append(
-        ReadinessCheck(
-            "final-library-untouched",
-            not final_library_modified,
-            (
-                "Final library is still untouched."
-                if not final_library_modified
-                else "Report indicates the final library has already been modified."
-            ),
-        )
-    )
-
-    ready = all(check.passed for check in checks)
-
-    readiness_report = {
-        "schemaVersion": 1,
-        "jobId": report.get("jobId"),
-        "status": "ready-for-placement" if ready else "not-ready",
-        "audioPath": str(audio_path),
-        "audioSha256": audio_sha,
-        "coverPath": str(cover_path) if cover_path is not None else None,
-        "coverSha256": cover_sha,
-        "actualCodec": actual_quality.codec,
-        "actualLossless": actual_quality.lossless,
-        "checks": [
-            {
-                "name": check.name,
-                "passed": check.passed,
-                "detail": check.detail,
-            }
-            for check in checks
-        ],
-        "plannedDestination": planned_destination,
-        "finalLibraryModified": final_library_modified,
-    }
-
-    readiness_report_path = job_dir / "readiness-report.json"
-    temp_path = job_dir / ".readiness-report.json.tmp"
-    temp_path.write_text(
-        json.dumps(readiness_report, indent=2, ensure_ascii=False) + "\n",
-        encoding="utf-8",
-    )
-    _read_json(temp_path)
-    temp_path.replace(readiness_report_path)
-
-    return ReadinessResult(
-        job_dir=job_dir,
-        ready=ready,
-        audio_path=audio_path,
-        cover_path=cover_path,
-        checks=tuple(checks),
-        actual_quality=actual_quality,
-        audio_sha256=audio_sha,
-        cover_sha256=cover_sha,
-        report_path=report_path,
-        readiness_report_path=readiness_report_path,
-    )
+def verify_staged_readiness(job_dir:Path):
+    job=job_dir.resolve(); rp=job/"fetch-report.json"
+    if not job.is_dir():raise ReadinessError(f"Staging job directory does not exist: {job}")
+    if not rp.is_file():raise ReadinessError(f"fetch-report.json not found: {rp}")
+    r=_read_json(rp); audio=_audio(job,r); cover=_cover(job,r); checks=[]
+    warnings=r.get("warnings") or [];checks.append(ReadinessCheck("warnings-cleared",not warnings,"No unresolved staging warnings." if not warnings else f"Unresolved warnings: {warnings}"))
+    sr=r.get("sourceResolution") or {};resolved=sr.get("status")=="resolved-by-actual-comparison"
+    checks.append(ReadinessCheck("source-resolved",resolved,"Source quality decision was resolved by actual candidate comparison." if resolved else "Source quality decision has not been formally resolved."))
+    ash=_sha(audio); recorded=str((r.get("audio") or {}).get("sha256") or "")
+    checks.append(ReadinessCheck("audio-sha256",bool(recorded) and ash==recorded,f"Audio SHA-256 verified: {ash}" if recorded and ash==recorded else f"Audio SHA-256 mismatch or missing report value; actual={ash}."))
+    meta=r.get("metadataNormalization") or {}; mv=meta.get("status")=="verified"
+    checks.append(ReadinessCheck("metadata-normalization",mv,f"Metadata normalization verified for {meta.get('metadataFamily') or 'recorded format'}." if mv else "Metadata normalization has not reached verified state."))
+    csha=None
+    if cover:
+        csha=_sha(cover); rec=str((r.get("cover") or {}).get("sha256") or "")
+        checks.append(ReadinessCheck("standalone-cover-sha256",bool(rec) and csha==rec,f"Standalone cover SHA-256 verified: {csha}" if rec and csha==rec else f"Standalone cover SHA-256 mismatch or missing report value; actual={csha}."))
+    else:checks.append(ReadinessCheck("standalone-cover-sha256",False,"Canonical standalone cover is missing."))
+    checks.extend(_metadata_checks(audio,_proposed_tags(r),meta.get("embeddedCoverSha256")))
+    q=inspect_actual_quality(audio); known=q.codec is not None and q.lossless is not None
+    checks.append(ReadinessCheck("actual-codec-known",known,f"Actual codec={q.codec}, quality={'lossless' if q.lossless else 'lossy'}." if known else "Actual codec/quality classification is incomplete."))
+    dest=r.get("plannedDestination");checks.append(ReadinessCheck("planned-destination",bool(dest),f"Planned destination recorded: {dest}" if dest else "Planned final destination is missing."))
+    modified=bool(r.get("finalLibraryModified"));checks.append(ReadinessCheck("final-library-untouched",not modified,"Final library is still untouched." if not modified else "Report indicates the final library has already been modified."))
+    ready=all(c.passed for c in checks); out={"schemaVersion":2,"jobId":r.get("jobId"),"status":"ready-for-placement" if ready else "not-ready",
+      "audioPath":str(audio),"audioSha256":ash,"coverPath":str(cover) if cover else None,"coverSha256":csha,
+      "metadataFamily":(r.get("audio") or {}).get("metadataFamily"),"actualCodec":q.codec,"actualLossless":q.lossless,
+      "checks":[{"name":c.name,"passed":c.passed,"detail":c.detail} for c in checks],"plannedDestination":dest,"finalLibraryModified":modified}
+    op=job/"readiness-report.json";tmp=job/".readiness-report.json.tmp";tmp.write_text(json.dumps(out,indent=2,ensure_ascii=False)+"\n",encoding="utf-8");_read_json(tmp);tmp.replace(op)
+    return ReadinessResult(job,ready,audio,cover,tuple(checks),q,ash,csha,rp,op)
