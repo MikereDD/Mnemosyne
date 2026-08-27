@@ -3,7 +3,9 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import struct
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -33,6 +35,7 @@ class StagedFile:
     sample_rate_hz: int | None
     channels: int | None
     quality_warning: str | None
+    source_name: str
 
 
 @dataclass(frozen=True)
@@ -51,9 +54,11 @@ class FetchResult:
     job_id: str
     staging_dir: Path
     audio: StagedFile
+    audio_files: tuple[StagedFile, ...]
     cover: StagedCover | None
     report_path: Path
     warnings: tuple[str, ...]
+    multi_file: bool
 
 
 _AUDIO_SIGNATURES = {
@@ -89,6 +94,22 @@ def _canonical_audio_name(plan: AcquisitionPlan, extension: str) -> str:
     title = sanitize_component(plan.item.title)
     date = str(plan.item.year) if plan.item.year else "Unknown"
     return f"{title} - {creator} ({date}){extension.lower()}"
+
+
+def _chapter_number(candidate: MediaCandidate, fallback: int) -> int:
+    stem = Path(candidate.name).stem
+    match = re.search(r"(?:^|[_-])(\d{2,3})(?:[_-]|$)", stem)
+    if match:
+        try:
+            return int(match.group(1))
+        except ValueError:
+            pass
+    return fallback
+
+
+def _canonical_chapter_name(candidate: MediaCandidate, index: int) -> str:
+    number = _chapter_number(candidate, index)
+    return f"{number:02d} - Chapter {number:02d}{candidate.extension.lower()}"
 
 
 def _validate_audio_signature(path: Path, candidate: MediaCandidate) -> str:
@@ -144,9 +165,9 @@ def _jpeg_dimensions(path: Path) -> tuple[int | None, int | None]:
                 0xC9, 0xCA, 0xCB,
                 0xCD, 0xCE, 0xCF,
             }:
-                precision = stream.read(1)
+                stream.read(1)
                 dimensions = stream.read(4)
-                if len(precision) != 1 or len(dimensions) != 4:
+                if len(dimensions) != 4:
                     return None, None
                 height, width = struct.unpack(">HH", dimensions)
                 return width, height
@@ -204,6 +225,15 @@ def _validate_cover(path: Path, extension: str) -> tuple[str, int | None, int | 
     raise FetchError(f"Unsupported cover image extension: {extension}")
 
 
+def _retry_delay(attempt: int) -> float:
+    # Bounded exponential backoff: 1s, 2s, 4s, 8s.
+    return float(min(2 ** (attempt - 1), 8))
+
+
+def _is_retryable_status(status_code: int) -> bool:
+    return status_code in {408, 425, 429, 500, 502, 503, 504}
+
+
 def _stream_download(
     url: str,
     destination: Path,
@@ -211,6 +241,7 @@ def _stream_download(
     expected_size: int | None,
     timeout: float,
     user_agent: str,
+    max_attempts: int = 5,
 ) -> tuple[int, str]:
     part_path = destination.with_name(destination.name + ".part")
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -220,83 +251,128 @@ def _stream_download(
             f"Staging target already exists; refusing to overwrite: {destination}"
         )
 
-    digest = hashlib.sha256()
-    actual_size = 0
+    last_error: Exception | None = None
 
-    try:
-        with httpx.stream(
-            "GET",
-            url,
-            timeout=httpx.Timeout(timeout, read=timeout),
-            follow_redirects=True,
-            headers={"User-Agent": user_agent},
-        ) as response:
-            response.raise_for_status()
+    for attempt in range(1, max_attempts + 1):
+        digest = hashlib.sha256()
+        actual_size = 0
+        part_path.unlink(missing_ok=True)
 
-            content_type = response.headers.get("content-type", "").lower()
-            if "text/html" in content_type or "application/xhtml" in content_type:
+        try:
+            with httpx.stream(
+                "GET",
+                url,
+                timeout=httpx.Timeout(timeout, read=timeout),
+                follow_redirects=True,
+                headers={"User-Agent": user_agent},
+            ) as response:
+                if response.status_code >= 400:
+                    if (
+                        _is_retryable_status(response.status_code)
+                        and attempt < max_attempts
+                    ):
+                        response.read()
+                        time.sleep(_retry_delay(attempt))
+                        continue
+
+                    try:
+                        response.raise_for_status()
+                    except httpx.HTTPStatusError as exc:
+                        raise FetchError(
+                            f"Download failed with HTTP {response.status_code} "
+                            f"after {attempt} attempt(s): {response.url}"
+                        ) from exc
+
+                content_type = response.headers.get("content-type", "").lower()
+                if "text/html" in content_type or "application/xhtml" in content_type:
+                    raise FetchError(
+                        f"Server returned non-media content type: "
+                        f"{content_type or 'unknown'}"
+                    )
+
+                with part_path.open("xb") as output:
+                    for chunk in response.iter_bytes(chunk_size=1024 * 1024):
+                        if not chunk:
+                            continue
+                        output.write(chunk)
+                        digest.update(chunk)
+                        actual_size += len(chunk)
+
+            if actual_size <= 0:
+                raise FetchError("Downloaded file is empty.")
+
+            if expected_size is not None and actual_size != expected_size:
                 raise FetchError(
-                    f"Server returned non-media content type: {content_type or 'unknown'}"
+                    f"Size verification failed: expected {expected_size} bytes, "
+                    f"received {actual_size} bytes."
                 )
 
-            with part_path.open("xb") as output:
-                for chunk in response.iter_bytes(chunk_size=1024 * 1024):
-                    if not chunk:
-                        continue
-                    output.write(chunk)
-                    digest.update(chunk)
-                    actual_size += len(chunk)
+            return actual_size, digest.hexdigest()
 
-        if actual_size <= 0:
-            raise FetchError("Downloaded file is empty.")
+        except FetchError:
+            part_path.unlink(missing_ok=True)
+            raise
 
-        if expected_size is not None and actual_size != expected_size:
+        except (
+            httpx.TimeoutException,
+            httpx.NetworkError,
+            httpx.RemoteProtocolError,
+        ) as exc:
+            last_error = exc
+            part_path.unlink(missing_ok=True)
+
+            if attempt >= max_attempts:
+                raise FetchError(
+                    f"Download failed after {max_attempts} attempts due to "
+                    f"a transient network error: {url}"
+                ) from exc
+
+            time.sleep(_retry_delay(attempt))
+
+        except httpx.HTTPError as exc:
+            part_path.unlink(missing_ok=True)
+            raise FetchError(f"HTTP download failed: {url}: {exc}") from exc
+
+        except OSError as exc:
+            part_path.unlink(missing_ok=True)
             raise FetchError(
-                f"Size verification failed: expected {expected_size} bytes, "
-                f"received {actual_size} bytes."
-            )
+                f"Could not write staged download {destination}: {exc}"
+            ) from exc
 
-        return actual_size, digest.hexdigest()
-    except Exception:
-        part_path.unlink(missing_ok=True)
-        raise
+    # Defensive guard; the loop either returns or raises.
+    raise FetchError(
+        f"Download failed after {max_attempts} attempts: {url}"
+    ) from last_error
 
 
-def _download_audio(
+
+def _download_audio_candidate(
     plan: AcquisitionPlan,
     candidate: MediaCandidate,
-    job_dir: Path,
+    target: Path,
     *,
     timeout: float,
 ) -> StagedFile:
-    source_path = job_dir / Path(candidate.name).name
-
     actual_size, sha256 = _stream_download(
         candidate.url,
-        source_path,
+        target,
         expected_size=candidate.size,
         timeout=timeout,
-        user_agent="Mnemosyne/0.1.0-dev.4",
+        user_agent="Mnemosyne/0.2.0-dev.1",
     )
 
-    part_path = source_path.with_name(source_path.name + ".part")
+    part_path = target.with_name(target.name + ".part")
     signature = _validate_audio_signature(part_path, candidate)
+    os.replace(part_path, target)
 
-    canonical_path = job_dir / _canonical_audio_name(plan, candidate.extension)
-    if canonical_path.exists():
-        part_path.unlink(missing_ok=True)
-        raise FetchError(f"Canonical staging target already exists: {canonical_path}")
-
-    os.replace(part_path, canonical_path)
-
-    actual = inspect_actual_quality(canonical_path)
+    actual = inspect_actual_quality(target)
     quality_warning = provider_quality_mismatch(
         provider_claimed_lossless=candidate.lossless,
         actual=actual,
     )
 
     return StagedFile(
-        path=canonical_path,
+        path=target,
         expected_size=candidate.size,
         actual_size=actual_size,
         sha256=sha256,
@@ -307,6 +383,7 @@ def _download_audio(
         sample_rate_hz=actual.sample_rate_hz,
         channels=actual.channels,
         quality_warning=quality_warning,
+        source_name=candidate.name,
     )
 
 
@@ -324,7 +401,7 @@ def _download_cover(
         temp_destination,
         expected_size=candidate.size,
         timeout=timeout,
-        user_agent="Mnemosyne/0.1.0-dev.4",
+        user_agent="Mnemosyne/0.2.0-dev.1",
     )
 
     part_path = temp_destination.with_name(temp_destination.name + ".part")
@@ -355,14 +432,11 @@ def fetch_plan_to_staging(
     *,
     timeout: float = 60.0,
 ) -> FetchResult:
-    if len(plan.selected_audio) != 1:
-        raise FetchError(
-            "Safe Fetch currently requires exactly one selected audio candidate."
-        )
+    if not plan.selected_audio:
+        raise FetchError("Safe Fetch requires at least one selected audio candidate.")
 
-    candidate = plan.selected_audio[0]
-    if not candidate.playable:
-        raise FetchError("Selected candidate is not classified as playable audio.")
+    if any(not candidate.playable for candidate in plan.selected_audio):
+        raise FetchError("A selected candidate is not classified as playable audio.")
 
     job_id = _job_id(plan.item.identifier)
     job_dir = staging_root / job_id
@@ -370,8 +444,36 @@ def fetch_plan_to_staging(
         raise FetchError(f"Generated staging job already exists: {job_dir}")
     job_dir.mkdir(parents=True, exist_ok=False)
 
+    multi_file = len(plan.selected_audio) > 1
+
     try:
-        audio = _download_audio(plan, candidate, job_dir, timeout=timeout)
+        staged_audio: list[StagedFile] = []
+
+        if multi_file:
+            media_dir = job_dir / "audio"
+            media_dir.mkdir(exist_ok=False)
+
+            for index, candidate in enumerate(plan.selected_audio, start=1):
+                target = media_dir / _canonical_chapter_name(candidate, index)
+                staged_audio.append(
+                    _download_audio_candidate(
+                        plan,
+                        candidate,
+                        target,
+                        timeout=timeout,
+                    )
+                )
+        else:
+            candidate = plan.selected_audio[0]
+            target = job_dir / _canonical_audio_name(plan, candidate.extension)
+            staged_audio.append(
+                _download_audio_candidate(
+                    plan,
+                    candidate,
+                    target,
+                    timeout=timeout,
+                )
+            )
 
         cover: StagedCover | None = None
         if plan.selected_cover is not None:
@@ -379,14 +481,69 @@ def fetch_plan_to_staging(
 
         warnings = tuple(
             warning
-            for warning in (audio.quality_warning,)
+            for staged in staged_audio
+            for warning in (staged.quality_warning,)
             if warning is not None
         )
 
         status = "needs-attention" if warnings else "staged-normalized"
+        primary = staged_audio[0]
+
+        audio_report = {
+            "mode": "multi-file" if multi_file else "single-file",
+            "fileCount": len(staged_audio),
+            "canonicalStagedName": primary.path.name if not multi_file else None,
+            "stagedPath": str(primary.path) if not multi_file else None,
+            "files": [
+                {
+                    "index": index,
+                    "sourceName": candidate.name,
+                    "sourceUrl": candidate.url,
+                    "archiveFormat": candidate.archive_format,
+                    "archiveSource": candidate.source,
+                    "providerClaimedLossless": candidate.lossless,
+                    "expectedSize": candidate.size,
+                    "actualSize": staged.actual_size,
+                    "sha256": staged.sha256,
+                    "signature": staged.signature,
+                    "actualCodec": staged.actual_codec,
+                    "actualLossless": staged.actual_lossless,
+                    "actualBitrateBps": staged.bitrate_bps,
+                    "actualSampleRateHz": staged.sample_rate_hz,
+                    "actualChannels": staged.channels,
+                    "canonicalStagedName": staged.path.name,
+                    "stagedPath": str(staged.path),
+                }
+                for index, (candidate, staged) in enumerate(
+                    zip(plan.selected_audio, staged_audio),
+                    start=1,
+                )
+            ],
+        }
+
+        if not multi_file:
+            candidate = plan.selected_audio[0]
+            audio_report.update(
+                {
+                    "sourceName": candidate.name,
+                    "sourceUrl": candidate.url,
+                    "archiveFormat": candidate.archive_format,
+                    "archiveSource": candidate.source,
+                    "providerClaimedLossless": candidate.lossless,
+                    "expectedSize": candidate.size,
+                    "actualSize": primary.actual_size,
+                    "sha256": primary.sha256,
+                    "signature": primary.signature,
+                    "actualCodec": primary.actual_codec,
+                    "actualLossless": primary.actual_lossless,
+                    "actualBitrateBps": primary.bitrate_bps,
+                    "actualSampleRateHz": primary.sample_rate_hz,
+                    "actualChannels": primary.channels,
+                }
+            )
 
         report = {
-            "schemaVersion": 3,
+            "schemaVersion": 9,
             "jobId": job_id,
             "status": status,
             "createdAt": datetime.now(timezone.utc).isoformat(),
@@ -402,24 +559,13 @@ def fetch_plan_to_staging(
                 "year": plan.item.year,
             },
             "plannedDestination": str(plan.destination),
-            "audio": {
-                "sourceName": candidate.name,
-                "sourceUrl": candidate.url,
-                "archiveFormat": candidate.archive_format,
-                "archiveSource": candidate.source,
-                "providerClaimedLossless": candidate.lossless,
-                "expectedSize": candidate.size,
-                "actualSize": audio.actual_size,
-                "sha256": audio.sha256,
-                "signature": audio.signature,
-                "actualCodec": audio.actual_codec,
-                "actualLossless": audio.actual_lossless,
-                "actualBitrateBps": audio.bitrate_bps,
-                "actualSampleRateHz": audio.sample_rate_hz,
-                "actualChannels": audio.channels,
-                "canonicalStagedName": audio.path.name,
-                "stagedPath": str(audio.path),
+            "audioEdition": {
+                "selectedEditionKey": plan.selected_edition_key,
+                "multiFile": multi_file,
+                "fileCount": len(staged_audio),
+                "extension": plan.selected_audio[0].extension if plan.selected_audio else None,
             },
+            "audio": audio_report,
             "cover": (
                 {
                     "sourceName": plan.selected_cover.name,
@@ -449,15 +595,25 @@ def fetch_plan_to_staging(
         return FetchResult(
             job_id=job_id,
             staging_dir=job_dir,
-            audio=audio,
+            audio=primary,
+            audio_files=tuple(staged_audio),
             cover=cover,
             report_path=report_path,
             warnings=warnings,
+            multi_file=multi_file,
         )
+
     except Exception:
+        for path in sorted(job_dir.rglob("*"), reverse=True):
+            try:
+                if path.is_file():
+                    path.unlink()
+                elif path.is_dir():
+                    path.rmdir()
+            except OSError:
+                pass
         try:
-            if job_dir.exists() and not any(job_dir.iterdir()):
-                job_dir.rmdir()
+            job_dir.rmdir()
         except OSError:
             pass
         raise

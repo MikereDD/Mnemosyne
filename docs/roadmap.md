@@ -1,20 +1,19 @@
 # Roadmap
 
-## Phase 1 — First provider
-- [x] Complete verified Archive.org acquisition lifecycle
-- [x] Transactional staging, comparison, tagging, readiness, placement, completion, cleanup, pruning
-
 ## Phase 2 — Generalization
+
 - [x] Decouple metadata mutation/readiness from MP4
-- [x] MP3/ID3 metadata writer + verifier
-- [x] FLAC/Vorbis-comment metadata writer + verifier
-- [x] Multi-format inspection normalization
+- [x] Model single-file and multi-file audiobook editions
+- [x] Group ordered Archive/LibriVox chapter sets
+- [x] Keep original and derivative chapter editions distinct
+- [x] Explicit `--audio-format` edition preference
+- [x] Transactional multi-file staged fetching
+- [ ] Multi-file metadata normalization with track numbering
+- [ ] Multi-file staged readiness verification
+- [ ] Transactional multi-file final placement
+- [ ] Multi-file completion certification
 - [ ] Prove complete lifecycle with an MP3 audiobook
 - [ ] Prove complete lifecycle with a FLAC source
 - [ ] Single-candidate source-resolution policy
 - [ ] Batch fetch-list execution
 - [ ] Resume/retry across interrupted jobs
-- [ ] External metadata enrichment
-- [ ] Edition-aware cover validation/scoring
-- [ ] Existing-destination conflict resolution
-- [ ] Job ledger/state integration

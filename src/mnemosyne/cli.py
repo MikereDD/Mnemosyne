@@ -13,6 +13,25 @@ from .config import initialize_runtime, load_config, runtime_root
 from .fetcher import FetchError, fetch_plan_to_staging
 from .inspection import InspectionError, inspect_staging_job, latest_staging_job
 from .models import MediaType
+from .multifile_metadata import (
+    MultiFileMetadataError,
+    apply_multifile_tagging,
+    is_multifile_job,
+    preview_multifile_tagging,
+    verify_multifile_readiness,
+)
+from .multifile_placement import (
+    MultiFilePlacementError,
+    apply_multifile_placement,
+    preview_multifile_placement,
+)
+from .multifile_completion import (
+    MultiFileCompletionError,
+    apply_multifile_cleanup,
+    apply_multifile_completion,
+    preview_multifile_cleanup,
+    preview_multifile_completion,
+)
 from .planner import build_plan
 from .providers.archive_org import ArchiveOrgProvider
 from .providers.base import ProviderError
@@ -28,13 +47,22 @@ from .render import (
     render_plan,
     render_tagging_preview,
     render_tagging_result,
+    render_multifile_tag_preview,
+    render_multifile_tag_result,
+    render_multifile_readiness,
     render_readiness,
     render_placement_preview,
     render_placement_result,
+    render_multifile_placement_preview,
+    render_multifile_placement_result,
     render_completion_preview,
     render_completion_result,
+    render_multifile_completion_preview,
+    render_multifile_completion_result,
     render_cleanup_preview,
     render_cleanup_result,
+    render_multifile_cleanup_preview,
+    render_multifile_cleanup_result,
     render_prune_preview,
     render_prune_result,
 )
@@ -53,6 +81,7 @@ def _build_plan(
     year: int | None,
     title: str | None,
     creator: str | None,
+    audio_format: str | None,
 ):
     config = load_config()
     provider = ArchiveOrgProvider()
@@ -69,7 +98,11 @@ def _build_plan(
         console.print(f"[bold red]Provider error:[/bold red] {exc}")
         raise typer.Exit(code=2) from exc
 
-    return config, build_plan(item, config.library_root)
+    return config, build_plan(
+        item,
+        config.library_root,
+        preferred_audio_format=audio_format,
+    )
 
 
 @app.command()
@@ -92,9 +125,17 @@ def plan(
     year: Annotated[int | None, typer.Option("--year", help="Verified publication/release year override.")] = None,
     title: Annotated[str | None, typer.Option("--title", help="Verified title override.")] = None,
     creator: Annotated[str | None, typer.Option("--creator", help="Verified author/artist override.")] = None,
+    audio_format: Annotated[str | None, typer.Option("--audio-format", help="Prefer a complete audio edition by extension, e.g. mp3, m4b, flac.")] = None,
 ) -> None:
     """Discover an item and print the proposed acquisition plan. Writes no media."""
-    _, plan_result = _build_plan(media_type, url, year=year, title=title, creator=creator)
+    _, plan_result = _build_plan(
+        media_type,
+        url,
+        year=year,
+        title=title,
+        creator=creator,
+        audio_format=audio_format,
+    )
     render_plan(plan_result)
 
 
@@ -106,9 +147,17 @@ def fetch(
     year: Annotated[int | None, typer.Option("--year", help="Verified publication/release year override.")] = None,
     title: Annotated[str | None, typer.Option("--title", help="Verified title override.")] = None,
     creator: Annotated[str | None, typer.Option("--creator", help="Verified author/artist override.")] = None,
+    audio_format: Annotated[str | None, typer.Option("--audio-format", help="Prefer a complete audio edition by extension, e.g. mp3, m4b, flac.")] = None,
 ) -> None:
-    """Fetch the planned audio into staging only."""
-    _, plan_result = _build_plan(media_type, url, year=year, title=title, creator=creator)
+    """Fetch the planned audio edition into staging only."""
+    _, plan_result = _build_plan(
+        media_type,
+        url,
+        year=year,
+        title=title,
+        creator=creator,
+        audio_format=audio_format,
+    )
     render_plan(plan_result)
 
     if not apply:
@@ -200,56 +249,72 @@ def adopt_command(
     render_adoption(result)
 
 
+
 @app.command("tag")
 def tag_command(
     job: Annotated[Path | None, typer.Argument(help="Staging job directory. Omit to use the most recent completed job.")] = None,
     apply: Annotated[bool, typer.Option("--apply", help="Transactionally write canonical metadata and embed verified cover art in staging.")] = False,
 ) -> None:
-    """
-    Preview or apply canonical metadata normalization to staged MP4-family audio.
-
-    Without --apply this command is strictly read-only.
-    """
+    """Preview or apply canonical metadata normalization in staging."""
     try:
         job_dir = job if job is not None else latest_staging_job()
-        preview = preview_metadata_normalization(job_dir)
-    except (InspectionError, TaggingError) as exc:
+        multi_file = is_multifile_job(job_dir)
+        if multi_file:
+            preview_multi = preview_multifile_tagging(job_dir)
+        else:
+            preview = preview_metadata_normalization(job_dir)
+    except (InspectionError, TaggingError, MultiFileMetadataError) as exc:
         console.print(f"[bold red]Metadata normalization blocked:[/bold red] {exc}")
         raise typer.Exit(code=11) from exc
 
     if not apply:
-        render_tagging_preview(preview)
+        if multi_file:
+            render_multifile_tag_preview(preview_multi)
+        else:
+            render_tagging_preview(preview)
         return
 
     try:
-        result = apply_metadata_normalization(job_dir)
-    except (TaggingError, OSError) as exc:
+        if multi_file:
+            result_multi = apply_multifile_tagging(job_dir)
+        else:
+            result = apply_metadata_normalization(job_dir)
+    except (TaggingError, MultiFileMetadataError, OSError) as exc:
         console.print(f"[bold red]Metadata normalization failed:[/bold red] {exc}")
         raise typer.Exit(code=12) from exc
 
-    render_tagging_result(result)
+    if multi_file:
+        render_multifile_tag_result(result_multi)
+    else:
+        render_tagging_result(result)
+
 
 
 @app.command("ready")
 def ready_command(
     job: Annotated[Path | None, typer.Argument(help="Staging job directory. Omit to verify the most recent completed job.")] = None,
 ) -> None:
-    """
-    Perform the final read-only staged readiness verification.
-
-    This writes only readiness-report.json inside staging and never places media.
-    """
+    """Perform the final staged readiness verification."""
     try:
         job_dir = job if job is not None else latest_staging_job()
-        result = verify_staged_readiness(job_dir)
-    except (InspectionError, ReadinessError, OSError) as exc:
+        multi_file = is_multifile_job(job_dir)
+        if multi_file:
+            result_multi = verify_multifile_readiness(job_dir)
+        else:
+            result = verify_staged_readiness(job_dir)
+    except (InspectionError, ReadinessError, MultiFileMetadataError, OSError) as exc:
         console.print(f"[bold red]Readiness verification failed:[/bold red] {exc}")
         raise typer.Exit(code=13) from exc
 
-    render_readiness(result)
+    if multi_file:
+        render_multifile_readiness(result_multi)
+        if not result_multi.ready:
+            raise typer.Exit(code=14)
+    else:
+        render_readiness(result)
+        if not result.ready:
+            raise typer.Exit(code=14)
 
-    if not result.ready:
-        raise typer.Exit(code=14)
 
 
 @app.command("place")
@@ -257,29 +322,44 @@ def place_command(
     job: Annotated[Path | None, typer.Argument(help="Staging job directory. Omit to use the most recent completed job.")] = None,
     apply: Annotated[bool, typer.Option("--apply", help="Transactionally place the certified staged media into the final library.")] = False,
 ) -> None:
-    """
-    Preview or transactionally place a readiness-certified staging job.
-
-    Existing destinations are never overwritten or merged.
-    """
     try:
         job_dir = job if job is not None else latest_staging_job()
-        preview = preview_final_placement(job_dir)
-    except (InspectionError, PlacementError, OSError) as exc:
+        multi_file = is_multifile_job(job_dir)
+        if multi_file:
+            preview_multi = preview_multifile_placement(job_dir)
+        else:
+            preview = preview_final_placement(job_dir)
+    except (
+        InspectionError,
+        PlacementError,
+        MultiFilePlacementError,
+        MultiFileMetadataError,
+        OSError,
+    ) as exc:
         console.print(f"[bold red]Final placement blocked:[/bold red] {exc}")
         raise typer.Exit(code=15) from exc
 
     if not apply:
-        render_placement_preview(preview)
+        if multi_file:
+            render_multifile_placement_preview(preview_multi)
+        else:
+            render_placement_preview(preview)
         return
 
     try:
-        result = apply_final_placement(job_dir)
-    except (PlacementError, OSError) as exc:
+        if multi_file:
+            result_multi = apply_multifile_placement(job_dir)
+        else:
+            result = apply_final_placement(job_dir)
+    except (PlacementError, MultiFilePlacementError, OSError) as exc:
         console.print(f"[bold red]Final placement failed:[/bold red] {exc}")
         raise typer.Exit(code=16) from exc
 
-    render_placement_result(result)
+    if multi_file:
+        render_multifile_placement_result(result_multi)
+    else:
+        render_placement_result(result)
+
 
 
 @app.command("complete")
@@ -287,31 +367,48 @@ def complete_command(
     job: Annotated[Path | None, typer.Argument(help="Staging job directory. Omit to use the most recent completed placement job.")] = None,
     apply: Annotated[bool, typer.Option("--apply", help="Mark the fully verified acquisition lifecycle complete while retaining staging evidence.")] = False,
 ) -> None:
-    """
-    Preview or certify acquisition completion after verified final placement.
-
-    Completion never deletes staging evidence or prunes fetch-list entries.
-    """
     try:
         job_dir = job if job is not None else latest_staging_job()
-        preview = preview_completion(job_dir)
-    except (InspectionError, CompletionError, OSError) as exc:
+        multi_file = is_multifile_job(job_dir)
+        if multi_file:
+            preview_multi = preview_multifile_completion(job_dir)
+        else:
+            preview = preview_completion(job_dir)
+    except (
+        InspectionError,
+        CompletionError,
+        MultiFileCompletionError,
+        MultiFileMetadataError,
+        OSError,
+    ) as exc:
         console.print(f"[bold red]Completion blocked:[/bold red] {exc}")
         raise typer.Exit(code=17) from exc
 
     if not apply:
-        render_completion_preview(preview)
-        if not preview.ready_to_complete:
-            raise typer.Exit(code=18)
+        if multi_file:
+            render_multifile_completion_preview(preview_multi)
+            if not preview_multi.ready_to_complete:
+                raise typer.Exit(code=18)
+        else:
+            render_completion_preview(preview)
+            if not preview.ready_to_complete:
+                raise typer.Exit(code=18)
         return
 
     try:
-        result = apply_completion(job_dir)
-    except (CompletionError, OSError) as exc:
+        if multi_file:
+            result_multi = apply_multifile_completion(job_dir)
+        else:
+            result = apply_completion(job_dir)
+    except (CompletionError, MultiFileCompletionError, OSError) as exc:
         console.print(f"[bold red]Completion failed:[/bold red] {exc}")
         raise typer.Exit(code=19) from exc
 
-    render_completion_result(result)
+    if multi_file:
+        render_multifile_completion_result(result_multi)
+    else:
+        render_completion_result(result)
+
 
 
 @app.command("cleanup")
@@ -320,20 +417,28 @@ def cleanup_command(
     apply: Annotated[bool, typer.Option("--apply", help="Archive a durable completion receipt and delete the retained staging job.")] = False,
     confirm: Annotated[str | None, typer.Option("--confirm", help="Required with --apply. Must exactly match the job ID being deleted.")] = None,
 ) -> None:
-    """
-    Preview or explicitly remove a completed staging job.
-
-    Destructive cleanup requires both --apply and an exact --confirm <job-id>.
-    """
     try:
         job_dir = job if job is not None else latest_staging_job()
-        preview = preview_cleanup(job_dir)
-    except (InspectionError, CleanupError, OSError) as exc:
+        multi_file = is_multifile_job(job_dir)
+        if multi_file:
+            preview_multi = preview_multifile_cleanup(job_dir)
+        else:
+            preview = preview_cleanup(job_dir)
+    except (
+        InspectionError,
+        CleanupError,
+        MultiFileCompletionError,
+        MultiFileMetadataError,
+        OSError,
+    ) as exc:
         console.print(f"[bold red]Cleanup blocked:[/bold red] {exc}")
         raise typer.Exit(code=20) from exc
 
     if not apply:
-        render_cleanup_preview(preview)
+        if multi_file:
+            render_multifile_cleanup_preview(preview_multi)
+        else:
+            render_cleanup_preview(preview)
         return
 
     if confirm is None:
@@ -344,12 +449,24 @@ def cleanup_command(
         raise typer.Exit(code=21)
 
     try:
-        result = apply_cleanup(job_dir, confirm_job_id=confirm)
-    except (CleanupError, OSError) as exc:
+        if multi_file:
+            result_multi = apply_multifile_cleanup(
+                job_dir,
+                confirm_job_id=confirm,
+            )
+        else:
+            result = apply_cleanup(
+                job_dir,
+                confirm_job_id=confirm,
+            )
+    except (CleanupError, MultiFileCompletionError, OSError) as exc:
         console.print(f"[bold red]Cleanup failed:[/bold red] {exc}")
         raise typer.Exit(code=22) from exc
 
-    render_cleanup_result(result)
+    if multi_file:
+        render_multifile_cleanup_result(result_multi)
+    else:
+        render_cleanup_result(result)
 
 
 @app.command("prune")

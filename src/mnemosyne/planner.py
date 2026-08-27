@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+from .editions import choose_audio_edition, discover_audio_editions
 from .models import AcquisitionPlan, CandidateKind, MediaType
 from .paths import canonical_destination
 
 
-def build_plan(item, library_root) -> AcquisitionPlan:
+def build_plan(
+    item,
+    library_root,
+    *,
+    preferred_audio_format: str | None = None,
+) -> AcquisitionPlan:
     warnings: list[str] = []
 
     creator = item.creator or "Unknown Creator"
@@ -17,20 +23,22 @@ def build_plan(item, library_root) -> AcquisitionPlan:
             "Use --year to supply a verified year before applying."
         )
 
-    audio_candidates = sorted(
-        (
-            candidate
-            for candidate in item.candidates
-            if candidate.kind is CandidateKind.AUDIO and candidate.playable
-        ),
-        key=lambda candidate: (candidate.score, candidate.size or 0),
-        reverse=True,
+    editions = discover_audio_editions(item.candidates)
+    selected_edition = choose_audio_edition(
+        editions,
+        preferred_format=preferred_audio_format,
     )
 
-    selected_audio = audio_candidates[:1]
+    selected_audio = selected_edition.candidates if selected_edition else []
+
+    if preferred_audio_format and selected_edition is None:
+        warnings.append(
+            f"No playable audio edition matched preferred format "
+            f"{preferred_audio_format!r}."
+        )
 
     if item.media_type is MediaType.AUDIOBOOK and not selected_audio:
-        warnings.append("No playable audiobook audio candidate was found.")
+        warnings.append("No playable audiobook audio edition was found.")
 
     cover_candidates = sorted(
         (c for c in item.candidates if c.kind is CandidateKind.COVER),
@@ -55,4 +63,6 @@ def build_plan(item, library_root) -> AcquisitionPlan:
         selected_audio=selected_audio,
         selected_cover=selected_cover,
         warnings=warnings,
+        audio_editions=editions,
+        selected_edition_key=selected_edition.key if selected_edition else None,
     )

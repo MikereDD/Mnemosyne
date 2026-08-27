@@ -4,7 +4,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, Field, HttpUrl
+from pydantic import BaseModel, Field
 
 
 class MediaType(StrEnum):
@@ -48,9 +48,24 @@ class ArchiveItem(BaseModel):
     raw_metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class AudioEdition(BaseModel):
+    key: str
+    label: str
+    extension: str
+    archive_format: str | None = None
+    source: str | None = None
+    candidates: list[MediaCandidate] = Field(default_factory=list)
+    score: int = 0
+    total_size: int | None = None
+    multi_file: bool = False
+    sequence_numbers: list[int] = Field(default_factory=list)
+
+
 class AcquisitionPlan(BaseModel):
     item: ArchiveItem
     destination: Path
     selected_audio: list[MediaCandidate] = Field(default_factory=list)
     selected_cover: MediaCandidate | None = None
     warnings: list[str] = Field(default_factory=list)
+    audio_editions: list[AudioEdition] = Field(default_factory=list)
+    selected_edition_key: str | None = None

@@ -42,6 +42,7 @@ def _duration(value: float | None) -> str:
     return f"{minutes}:{seconds:02d}"
 
 
+
 def render_plan(plan: AcquisitionPlan) -> None:
     item = plan.item
     console.print(Panel.fit("[bold]Mnemosyne[/bold]\n[dim]Archive.org acquisition plan[/dim]", border_style="cyan"))
@@ -58,31 +59,42 @@ def render_plan(plan: AcquisitionPlan) -> None:
     summary.add_row("Destination", str(plan.destination))
     console.print(summary)
 
-    audio = [c for c in item.candidates if c.kind is CandidateKind.AUDIO]
-    auxiliary = [c for c in item.candidates if c.kind is CandidateKind.AUXILIARY]
-    table = Table(title="Playable audio candidates", show_lines=False)
-    table.add_column("Rank", justify="right")
-    table.add_column("File")
-    table.add_column("Format")
-    table.add_column("Source")
-    table.add_column("Size", justify="right")
-    table.add_column("Score", justify="right")
-    table.add_column("Why")
-    ranked = sorted(audio, key=lambda c: (c.score, c.size or 0), reverse=True)
-    for index, candidate in enumerate(ranked, start=1):
-        selected = bool(plan.selected_audio and candidate.name == plan.selected_audio[0].name)
-        table.add_row(
-            f"[green]{index} ✓[/green]" if selected else str(index),
-            candidate.name,
-            candidate.archive_format or candidate.extension,
-            candidate.source or "?",
-            _size(candidate.size),
-            str(candidate.score),
-            ", ".join(candidate.reasons),
-        )
-    if ranked:
+    if plan.audio_editions:
+        table = Table(title="Playable audio editions")
+        table.add_column("Rank", justify="right")
+        table.add_column("Edition")
+        table.add_column("Files", justify="right")
+        table.add_column("Format")
+        table.add_column("Source")
+        table.add_column("Total size", justify="right")
+        table.add_column("Score", justify="right")
+        for index, edition in enumerate(plan.audio_editions, start=1):
+            selected = edition.key == plan.selected_edition_key
+            table.add_row(
+                f"[green]{index} ✓[/green]" if selected else str(index),
+                edition.label,
+                str(len(edition.candidates)),
+                edition.archive_format or edition.extension,
+                edition.source or "?",
+                _size(edition.total_size),
+                str(edition.score),
+            )
         console.print(table)
 
+        selected = next(
+            (edition for edition in plan.audio_editions if edition.key == plan.selected_edition_key),
+            None,
+        )
+        if selected and selected.multi_file:
+            members = Table(title=f"Selected chapter set ({len(selected.candidates)} files)")
+            members.add_column("#", justify="right")
+            members.add_column("Source file")
+            members.add_column("Size", justify="right")
+            for index, candidate in enumerate(selected.candidates, start=1):
+                members.add_row(str(index), candidate.name, _size(candidate.size))
+            console.print(members)
+
+    auxiliary = [c for c in item.candidates if c.kind is CandidateKind.AUXILIARY]
     if auxiliary:
         excluded_names = ", ".join(c.name for c in auxiliary[:8])
         if len(auxiliary) > 8:
@@ -100,7 +112,14 @@ def render_plan(plan: AcquisitionPlan) -> None:
             warning_text.append("\n")
         console.print(Panel(warning_text, title="Needs attention", border_style="yellow"))
 
-    console.print(Panel("[bold green]Plan complete.[/bold green]\nProvider quality claims remain provisional until the file is inspected.", border_style="green"))
+    console.print(
+        Panel(
+            "[bold green]Plan complete.[/bold green]\n"
+            "Provider quality claims remain provisional until downloaded files are inspected.",
+            border_style="green",
+        )
+    )
+
 
 
 def render_fetch_result(result: FetchResult) -> None:
@@ -109,23 +128,64 @@ def render_fetch_result(result: FetchResult) -> None:
     table.add_column()
     table.add_row("Job", result.job_id)
     table.add_row("Staging", str(result.staging_dir))
-    table.add_row("Audio", str(result.audio.path))
-    table.add_row("Audio size", _size(result.audio.actual_size))
-    table.add_row("Signature", result.audio.signature)
-    table.add_row("Actual codec", result.audio.actual_codec or "?")
-    table.add_row("Actual quality", "lossless" if result.audio.actual_lossless is True else "lossy" if result.audio.actual_lossless is False else "unknown")
-    if result.audio.bitrate_bps:
-        table.add_row("Actual bitrate", f"{result.audio.bitrate_bps / 1000:.1f} kbps")
-    table.add_row("Audio SHA-256", result.audio.sha256)
+    table.add_row("Audio mode", "multi-file" if result.multi_file else "single-file")
+    table.add_row("Audio files", str(len(result.audio_files)))
+
+    if not result.multi_file:
+        table.add_row("Audio", str(result.audio.path))
+        table.add_row("Audio size", _size(result.audio.actual_size))
+        table.add_row("Signature", result.audio.signature)
+        table.add_row("Actual codec", result.audio.actual_codec or "?")
+        table.add_row("Audio SHA-256", result.audio.sha256)
+    else:
+        total = sum(file.actual_size for file in result.audio_files)
+        table.add_row("Audio folder", str(result.audio_files[0].path.parent))
+        table.add_row("Total audio size", _size(total))
+
     if result.cover:
         table.add_row("Cover", str(result.cover.path))
     table.add_row("Report", str(result.report_path))
 
-    title = "[bold yellow]STAGED + NEEDS ATTENTION[/bold yellow]" if result.warnings else "[bold green]STAGED + NORMALIZED + VERIFIED[/bold green]"
+    title = (
+        "[bold yellow]STAGED + NEEDS ATTENTION[/bold yellow]"
+        if result.warnings
+        else "[bold green]STAGED + VERIFIED[/bold green]"
+    )
     console.print(Panel(table, title=title, border_style="yellow" if result.warnings else "green"))
+
+    if result.multi_file:
+        files = Table(title="Staged audio files")
+        files.add_column("#", justify="right")
+        files.add_column("Canonical file")
+        files.add_column("Codec")
+        files.add_column("Size", justify="right")
+        files.add_column("SHA-256")
+        for index, staged in enumerate(result.audio_files, start=1):
+            files.add_row(
+                str(index),
+                staged.path.name,
+                staged.actual_codec or "?",
+                _size(staged.actual_size),
+                staged.sha256,
+            )
+        console.print(files)
+
     if result.warnings:
-        console.print(Panel("\n".join(f"• {w}" for w in result.warnings), title="Quality cross-check", border_style="yellow"))
-    console.print(Panel("[bold]Final library modified: NO[/bold]\nDownloaded media remains isolated in Mnemosyne staging.", border_style="cyan"))
+        console.print(
+            Panel(
+                "\n".join(f"• {w}" for w in result.warnings),
+                title="Quality cross-check",
+                border_style="yellow",
+            )
+        )
+
+    console.print(
+        Panel(
+            "[bold]Final library modified: NO[/bold]\n"
+            "Downloaded media remains isolated in Mnemosyne staging.",
+            border_style="cyan",
+        )
+    )
 
 
 def render_inspection(result: MetadataInspection) -> None:
@@ -630,3 +690,222 @@ def render_prune_result(result: PruneResult) -> None:
             border_style="green",
         )
     )
+
+
+def render_multifile_tag_preview(preview) -> None:
+    console.print(Panel.fit(
+        "[bold]Mnemosyne[/bold]\n[dim]Whole-edition metadata preview[/dim]",
+        border_style="cyan",
+    ))
+    table = Table(title=f"MP3 chapter metadata ({len(preview.tracks)} files)")
+    table.add_column("#", justify="right")
+    table.add_column("File")
+    table.add_column("Title")
+    table.add_column("Track")
+    for track in preview.tracks:
+        table.add_row(
+            str(track.index),
+            track.path.name,
+            track.tags.get("title", ""),
+            f"{track.index}/{track.total}",
+        )
+    console.print(table)
+    console.print(Panel(
+        "[bold yellow]Preview only.[/bold yellow]\n"
+        "Every chapter will be prepared and verified before canonical staged files are replaced.\n"
+        "No staged audio or final-library media was modified.",
+        border_style="yellow",
+    ))
+
+
+def render_multifile_tag_result(result) -> None:
+    table = Table(show_header=False, box=None, pad_edge=False)
+    table.add_column(style="bold")
+    table.add_column()
+    table.add_row("Audio mode", "multi-file")
+    table.add_row("Files", str(result.file_count))
+    table.add_row("Rollback edition", str(result.rollback_dir))
+    table.add_row("Edition SHA-256", result.edition_sha256)
+    table.add_row("Embedded cover SHA-256", result.embedded_cover_sha256)
+    table.add_row("Updated report", str(result.report_path))
+    console.print(Panel(
+        table,
+        title="[bold green]WHOLE EDITION METADATA NORMALIZED + VERIFIED[/bold green]",
+        border_style="green",
+    ))
+    console.print(Panel(
+        "[bold]All working copies verified before commit: YES[/bold]\n"
+        "[bold]Whole-edition rollback preserved: YES[/bold]\n"
+        "[bold]Final library modified: NO[/bold]",
+        border_style="cyan",
+    ))
+
+
+def render_multifile_readiness(result) -> None:
+    console.print(Panel.fit(
+        "[bold]Mnemosyne[/bold]\n[dim]Multi-file staged readiness verification[/dim]",
+        border_style="cyan",
+    ))
+    table = Table(title="Readiness checks")
+    table.add_column("Result")
+    table.add_column("Check")
+    table.add_column("Detail")
+    for check in result.checks:
+        table.add_row(
+            "[green]PASS[/green]" if check.passed else "[red]FAIL[/red]",
+            check.name,
+            check.detail,
+        )
+    console.print(table)
+    console.print(f"[bold]Audio files:[/bold] {result.file_count}")
+    console.print(f"[bold]Edition SHA-256:[/bold] {result.edition_sha256}")
+    console.print(Panel(
+        "[bold green]READY FOR MULTI-FILE PLACEMENT[/bold green]"
+        if result.ready else
+        "[bold red]NOT READY[/bold red]",
+        border_style="green" if result.ready else "red",
+    ))
+
+
+def render_multifile_placement_preview(preview) -> None:
+    console.print(Panel.fit(
+        "[bold]Mnemosyne[/bold]\n[dim]Transactional multi-file placement preview[/dim]",
+        border_style="cyan",
+    ))
+    table = Table(show_header=False, box=None, pad_edge=False)
+    table.add_column(style="bold")
+    table.add_column()
+    table.add_row("Destination", str(preview.destination))
+    table.add_row("Audio files", str(len(preview.audio_sources)))
+    table.add_row("Edition SHA-256", preview.edition_sha256)
+    table.add_row("Cover SHA-256", preview.cover_sha256)
+    console.print(table)
+    console.print(Panel(
+        "[bold yellow]Preview only.[/bold yellow]\n"
+        "Apply copies the entire edition into a hidden sibling directory, "
+        "verifies it, then commits with one directory rename.",
+        border_style="yellow",
+    ))
+
+
+def render_multifile_placement_result(result) -> None:
+    table = Table(show_header=False, box=None, pad_edge=False)
+    table.add_column(style="bold")
+    table.add_column()
+    table.add_row("Destination", str(result.destination))
+    table.add_row("Audio files", str(len(result.audio_paths)))
+    table.add_row("Edition SHA-256", result.edition_sha256)
+    table.add_row("Cover", str(result.cover_path))
+    table.add_row("Cover SHA-256", result.cover_sha256)
+    table.add_row("Placement report", str(result.placement_report_path))
+    console.print(Panel(
+        table,
+        title="[bold green]MULTI-FILE PLACED + VERIFIED[/bold green]",
+        border_style="green",
+    ))
+    console.print(Panel(
+        "[bold]Existing destination overwritten: NO[/bold]\n"
+        "[bold]Pre-commit whole-edition verification: PASSED[/bold]\n"
+        "[bold]Post-placement whole-edition verification: PASSED[/bold]\n"
+        "[bold]Final library modified: YES[/bold]",
+        border_style="cyan",
+    ))
+
+
+def render_multifile_completion_preview(preview) -> None:
+    console.print(Panel.fit(
+        "[bold]Mnemosyne[/bold]\n[dim]Multi-file completion certification preview[/dim]",
+        border_style="cyan",
+    ))
+    table = Table(title="Completion checks")
+    table.add_column("Result")
+    table.add_column("Check")
+    table.add_column("Detail")
+    for check in preview.checks:
+        table.add_row(
+            "[green]PASS[/green]" if check.passed else "[red]FAIL[/red]",
+            check.name,
+            check.detail,
+        )
+    console.print(table)
+    console.print(f"[bold]Audio files:[/bold] {len(preview.audio_paths)}")
+    console.print(f"[bold]Edition SHA-256:[/bold] {preview.edition_sha256}")
+    console.print(Panel(
+        "[bold green]READY TO COMPLETE[/bold green]"
+        if preview.ready_to_complete else
+        "[bold red]NOT READY TO COMPLETE[/bold red]",
+        border_style="green" if preview.ready_to_complete else "red",
+    ))
+
+
+def render_multifile_completion_result(result) -> None:
+    table = Table(show_header=False, box=None, pad_edge=False)
+    table.add_column(style="bold")
+    table.add_column()
+    table.add_row("Completed at", result.completed_at)
+    table.add_row("Destination", str(result.destination))
+    table.add_row("Audio files", str(len(result.audio_paths)))
+    table.add_row("Edition SHA-256", result.edition_sha256)
+    table.add_row("Cover", str(result.cover_path))
+    table.add_row("Completion report", str(result.completion_report_path))
+    console.print(Panel(
+        table,
+        title="[bold green]MULTI-FILE ACQUISITION COMPLETE[/bold green]",
+        border_style="green",
+    ))
+    console.print(Panel(
+        "[bold]Staging retained: YES[/bold]\n"
+        "[bold]Automatic cleanup: NO[/bold]\n"
+        "[bold]Fetch list pruned: NO[/bold]",
+        border_style="cyan",
+    ))
+
+
+def render_multifile_cleanup_preview(preview) -> None:
+    table = Table(show_header=False, box=None, pad_edge=False)
+    table.add_column(style="bold")
+    table.add_column()
+    table.add_row("Job ID", preview.job_id)
+    table.add_row("Staging", str(preview.job_dir))
+    table.add_row("Final destination", str(preview.final_destination))
+    table.add_row("Audio files", str(len(preview.audio_paths)))
+    table.add_row("Edition SHA-256", preview.edition_sha256)
+    table.add_row("Durable receipt", str(preview.receipt_path))
+    table.add_row("Staging files", str(preview.file_count))
+    table.add_row("Staging bytes", str(preview.staging_size_bytes))
+    console.print(Panel(
+        table,
+        title="[bold yellow]MULTI-FILE CLEANUP PREVIEW[/bold yellow]",
+        border_style="yellow",
+    ))
+    console.print(Panel(
+        "Final edition and cover were reverified.\n"
+        "No staging files were deleted.\n"
+        f"Apply requires: [bold]--confirm {preview.job_id}[/bold]",
+        border_style="cyan",
+    ))
+
+
+def render_multifile_cleanup_result(result) -> None:
+    table = Table(show_header=False, box=None, pad_edge=False)
+    table.add_column(style="bold")
+    table.add_column()
+    table.add_row("Job ID", result.job_id)
+    table.add_row("Removed staging", str(result.removed_job_dir))
+    table.add_row("Durable receipt", str(result.receipt_path))
+    table.add_row("Final destination", str(result.final_destination))
+    table.add_row("Edition SHA-256", result.edition_sha256)
+    table.add_row("Final cover SHA-256", result.final_cover_sha256)
+    table.add_row("Removed files", str(result.file_count))
+    table.add_row("Removed bytes", str(result.staging_size_bytes))
+    console.print(Panel(
+        table,
+        title="[bold green]MULTI-FILE STAGING CLEANED[/bold green]",
+        border_style="green",
+    ))
+    console.print(Panel(
+        "[bold]Durable receipt: VERIFIED[/bold]\n"
+        "[bold]Final library: UNCHANGED + VERIFIED[/bold]\n"
+        "[bold]Staging job: REMOVED[/bold]",
+        border_style="cyan",
+    ))
