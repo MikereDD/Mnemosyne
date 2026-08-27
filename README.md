@@ -25,7 +25,7 @@
 </p>
 
 <p align="center">
-  <a href="#quick-start"><strong>Quick Start</strong></a>
+  <a href="#development-quick-start"><strong>Quick Start</strong></a>
   &nbsp;•&nbsp;
   <a href="#what-mnemosyne-does"><strong>Features</strong></a>
   &nbsp;•&nbsp;
@@ -226,7 +226,10 @@ Band/
 See [`docs/library-layout.md`](docs/library-layout.md) for the evolving library
 conventions.
 
-## Quick start
+## Development quick start
+
+Mnemosyne is currently a development project rather than a packaged stable
+release. The supported way to try it today is directly from the repository.
 
 ### Requirements
 
@@ -234,12 +237,18 @@ conventions.
 - [`uv`](https://docs.astral.sh/uv/) recommended
 - Network access for provider-backed acquisition
 
-Clone the repository and install the development environment:
+Clone the repository and sync the development environment:
 
 ```powershell
 git clone https://github.com/MikereDD/Mnemosyne.git
 cd Mnemosyne
 uv sync
+```
+
+Initialize Mnemosyne's per-user runtime directories and configuration:
+
+```powershell
+uv run mnemosyne init
 ```
 
 Run the CLI:
@@ -260,7 +269,7 @@ Plan an Internet Archive audiobook acquisition without changing anything:
 
 ```powershell
 uv run mnemosyne plan audiobook `
-  "https://archive.org/details/example-item" `
+  "<archive-item-url>" `
   --year 1945
 ```
 
@@ -268,7 +277,7 @@ Fetch into isolated staging:
 
 ```powershell
 uv run mnemosyne fetch audiobook `
-  "https://archive.org/details/example-item" `
+  "<archive-item-url>" `
   --year 1945 `
   --apply
 ```
