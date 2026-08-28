@@ -1,62 +1,19 @@
 # Roadmap
 
-Mnemosyne is currently a concept-stage project.
+## Phase 2 — Generalization
 
-## Phase 0 — Foundation
-
-- [x] Name the project
-- [x] Create project avatar
-- [x] Define media types
-- [x] Define canonical library layouts
-- [x] Define core workflow
-- [ ] Choose implementation language
-- [ ] Choose CLI/UI approach
-- [ ] Define configuration format
-- [ ] Define provider interface
-- [ ] Define metadata model
-
-## Phase 1 — First provider
-
-Likely initial target: Archive.org.
-
-- [ ] Item discovery
-- [ ] Metadata retrieval
-- [ ] Format selection
-- [ ] Download planning
-- [ ] Safe fetching
-- [ ] Resume/retry
-- [ ] Cover retrieval
-- [ ] Destination naming
-- [ ] Verification
-
-## Phase 2 — Media normalization
-
-### eBooks
-
-- [ ] EPUB/PDF naming
-- [ ] Metadata normalization
-- [ ] Cover handling
-
-### Audiobooks
-
-- [ ] M4B handling
-- [ ] MP3 chapter handling
-- [ ] Chapter numbering
-- [ ] Metadata normalization
-- [ ] Cover embedding
-
-### Music
-
-- [ ] Album/track naming
-- [ ] Track numbering
-- [ ] Metadata normalization
-- [ ] Cover embedding
-
-## Phase 3 — Library intelligence
-
-- [ ] Existing-item detection
-- [ ] Duplicate detection
-- [ ] Conflict resolution
-- [ ] Audit/report mode
-- [ ] Batch acquisition
-- [ ] Provider expansion
+- [x] Decouple metadata mutation/readiness from MP4
+- [x] Model single-file and multi-file audiobook editions
+- [x] Group ordered Archive/LibriVox chapter sets
+- [x] Keep original and derivative chapter editions distinct
+- [x] Explicit `--audio-format` edition preference
+- [x] Transactional multi-file staged fetching
+- [ ] Multi-file metadata normalization with track numbering
+- [ ] Multi-file staged readiness verification
+- [ ] Transactional multi-file final placement
+- [ ] Multi-file completion certification
+- [ ] Prove complete lifecycle with an MP3 audiobook
+- [ ] Prove complete lifecycle with a FLAC source
+- [ ] Single-candidate source-resolution policy
+- [ ] Batch fetch-list execution
+- [ ] Resume/retry across interrupted jobs
