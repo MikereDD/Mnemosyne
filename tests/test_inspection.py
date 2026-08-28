@@ -1,6 +1,11 @@
 from pathlib import Path
 
-from mnemosyne.inspection import _proposed_tags, latest_staging_job
+from mnemosyne.inspection import (
+    InspectionError,
+    _proposed_tags,
+    _resolve_multifile_audio_paths,
+    latest_staging_job,
+)
 
 
 def test_proposed_audiobook_tags() -> None:
@@ -45,3 +50,31 @@ def test_latest_staging_job_uses_completed_report(tmp_path: Path) -> None:
     os.utime(newer_report, (1_800_000_000, 1_800_000_000))
 
     assert latest_staging_job(tmp_path) == newer
+
+def test_resolve_multifile_audio_paths_uses_report_order(tmp_path: Path) -> None:
+    job = tmp_path / "job"
+    audio_dir = job / "audio"
+    audio_dir.mkdir(parents=True)
+    first = audio_dir / "01 - Chapter 01.flac"
+    second = audio_dir / "02 - Chapter 02.flac"
+    first.write_bytes(b"first")
+    second.write_bytes(b"second")
+    report = {"audio": {"mode": "multi-file", "fileCount": 2, "files": [{"stagedPath": str(first)}, {"stagedPath": str(second)}]}}
+    assert _resolve_multifile_audio_paths(job, report) == [first, second]
+
+
+def test_resolve_multifile_audio_paths_rejects_missing_member(tmp_path: Path) -> None:
+    job = tmp_path / "job"
+    audio_dir = job / "audio"
+    audio_dir.mkdir(parents=True)
+    present = audio_dir / "01 - Chapter 01.flac"
+    missing = audio_dir / "02 - Chapter 02.flac"
+    present.write_bytes(b"first")
+    report = {"audio": {"mode": "multi-file", "fileCount": 2, "files": [{"stagedPath": str(present)}, {"stagedPath": str(missing)}]}}
+    try:
+        _resolve_multifile_audio_paths(job, report)
+    except InspectionError as exc:
+        assert "is missing" in str(exc)
+    else:
+        raise AssertionError("missing multi-file member should block inspection")
+

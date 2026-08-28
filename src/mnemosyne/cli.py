@@ -11,7 +11,12 @@ from .completion import CompletionError, apply_completion, preview_completion
 from .cleanup import CleanupError, apply_cleanup, preview_cleanup
 from .config import initialize_runtime, load_config, runtime_root
 from .fetcher import FetchError, fetch_plan_to_staging
-from .inspection import InspectionError, inspect_staging_job, latest_staging_job
+from .inspection import (
+    InspectionError,
+    inspect_multifile_staging_job,
+    inspect_staging_job,
+    latest_staging_job,
+)
 from .models import MediaType
 from .multifile_metadata import (
     MultiFileMetadataError,
@@ -44,6 +49,7 @@ from .render import (
     render_comparison,
     render_fetch_result,
     render_inspection,
+    render_multifile_inspection,
     render_plan,
     render_tagging_preview,
     render_tagging_result,
@@ -184,12 +190,19 @@ def inspect_command(
     """Inspect staged audio properties/tags and preview canonical metadata. Read-only."""
     try:
         job_dir = job if job is not None else latest_staging_job()
-        result = inspect_staging_job(job_dir)
-    except InspectionError as exc:
+        multi_file = is_multifile_job(job_dir)
+        if multi_file:
+            result_multi = inspect_multifile_staging_job(job_dir)
+        else:
+            result = inspect_staging_job(job_dir)
+    except (InspectionError, MultiFileMetadataError) as exc:
         console.print(f"[bold red]Inspection failed:[/bold red] {exc}")
         raise typer.Exit(code=6) from exc
 
-    render_inspection(result)
+    if multi_file:
+        render_multifile_inspection(result_multi)
+    else:
+        render_inspection(result)
 
 
 @app.command("compare")

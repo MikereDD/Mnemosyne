@@ -10,11 +10,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from mutagen.id3 import TRCK
-from mutagen.mp3 import MP3
-
 from .inspection import _proposed_tags
-from .metadata_io import MetadataIOError, read_metadata, verify_metadata, write_metadata
+from .metadata_io import MetadataIOError, metadata_family, read_metadata, verify_metadata, write_metadata
 from .quality import inspect_actual_quality
 from .readiness import ReadinessCheck
 
@@ -126,17 +123,47 @@ def _audio_entries(report: dict[str, Any]) -> list[tuple[dict[str, Any], Path]]:
     for entry in entries:
         path = Path(str(entry.get("stagedPath") or ""))
         if not path.is_file():
-            raise MultiFileMetadataError(f"Staged chapter is missing: {path}")
-        if path.suffix.lower() != ".mp3":
+            raise MultiFileMetadataError(f"Staged audio file is missing: {path}")
+        if path.suffix.lower() not in {".mp3", ".flac"}:
             raise MultiFileMetadataError(
-                "Multi-file metadata Slice 2 currently requires an MP3 edition."
+                "Multi-file metadata currently supports MP3 and FLAC editions."
             )
         result.append((entry, path))
+
+    families = {metadata_family(path) for _, path in result}
+    if len(families) != 1:
+        raise MultiFileMetadataError(
+            f"Multi-file edition mixes metadata families: {sorted(families)}"
+        )
     return result
 
 
 def _fallback_title(path: Path) -> str:
     return re.sub(r"^\d+\s*-\s*", "", path.stem).strip() or path.stem
+
+
+_FLAT_DISC_SIDE_TITLE = re.compile(
+    r"(?:^|[_ .-])disc[ _.-]*0*(?P<disc>\d+)"
+    r"[ _.-]*side[ _.-]*0*(?P<side>\d+)(?:$|[_ .-])",
+    re.IGNORECASE,
+)
+
+
+def _source_identity_title(source_name: str | None) -> str | None:
+    if not source_name:
+        return None
+    stem = Path(str(source_name).replace("\\", "/")).stem
+    match = _FLAT_DISC_SIDE_TITLE.search(stem)
+    if not match:
+        return None
+    try:
+        disc = int(match.group("disc"))
+        side = int(match.group("side"))
+    except (TypeError, ValueError):
+        return None
+    if disc <= 0 or side <= 0:
+        return None
+    return f"Disc {disc} Side {side}"
 
 
 def _normalize_chapter_title(value: str) -> str:
@@ -145,7 +172,12 @@ def _normalize_chapter_title(value: str) -> str:
     return title or value.strip()
 
 
-def _track_tags(report: dict[str, Any], path: Path) -> dict[str, str]:
+def _track_tags(
+    report: dict[str, Any],
+    path: Path,
+    *,
+    source_name: str | None = None,
+) -> dict[str, str]:
     tags = _proposed_tags(report)
     try:
         snapshot = read_metadata(path)
@@ -156,32 +188,10 @@ def _track_tags(report: dict[str, Any], path: Path) -> dict[str, str]:
     if existing:
         tags["title"] = _normalize_chapter_title(str(existing))
     else:
-        tags["title"] = _normalize_chapter_title(_fallback_title(path))
+        source_title = _source_identity_title(source_name)
+        tags["title"] = source_title or _normalize_chapter_title(_fallback_title(path))
 
     return tags
-
-
-def _write_track_number(path: Path, index: int, total: int) -> None:
-    audio = MP3(path)
-    if audio.tags is None:
-        audio.add_tags()
-    assert audio.tags is not None
-    audio.tags.delall("TRCK")
-    audio.tags.add(TRCK(encoding=3, text=[f"{index}/{total}"]))
-    audio.save(v2_version=4)
-
-
-def _verify_track_number(path: Path, index: int, total: int) -> None:
-    audio = MP3(path)
-    tags = audio.tags
-    frames = tags.getall("TRCK") if tags is not None else []
-    actual = str(frames[0].text[0]) if frames and frames[0].text else None
-    expected = f"{index}/{total}"
-    if actual != expected:
-        raise MultiFileMetadataError(
-            f"Track-number verification failed for {path.name}: "
-            f"expected {expected!r}, found {actual!r}."
-        )
 
 
 def preview_multifile_tagging(job_dir: Path) -> MultiTagPreview:
@@ -202,9 +212,16 @@ def preview_multifile_tagging(job_dir: Path) -> MultiTagPreview:
             index=index,
             total=total,
             path=path,
-            tags=_track_tags(report, path),
+            tags={
+                **_track_tags(
+                    report,
+                    path,
+                    source_name=str(entry.get("sourceName") or ""),
+                ),
+                "track": f"{index}/{total}",
+            },
         )
-        for index, (_, path) in enumerate(entries, start=1)
+        for index, (entry, path) in enumerate(entries, start=1)
     )
     return MultiTagPreview(job_dir, cover, tracks)
 
@@ -243,9 +260,7 @@ def apply_multifile_tagging(job_dir: Path) -> MultiTagResult:
                     f"Cover SHA changed while tagging {track.path.name}."
                 )
 
-            _write_track_number(work, track.index, track.total)
             verify_metadata(work, track.tags, expected_cover_sha256=cover_sha)
-            _verify_track_number(work, track.index, track.total)
 
             post_hashes.append(_sha256(work))
             work_paths.append(work)
@@ -263,7 +278,6 @@ def apply_multifile_tagging(job_dir: Path) -> MultiTagResult:
         canonical_hashes: list[str] = []
         for track, expected_hash in zip(preview.tracks, post_hashes):
             verify_metadata(track.path, track.tags, expected_cover_sha256=cover_sha)
-            _verify_track_number(track.path, track.index, track.total)
 
             actual_hash = _sha256(track.path)
             if actual_hash != expected_hash:
@@ -295,14 +309,15 @@ def apply_multifile_tagging(job_dir: Path) -> MultiTagResult:
                     "embeddedArtwork": True,
                     "embeddedArtworkSha256": cover_sha,
                     "preTagSha256": pre_hash,
-                    "trackNumber": f"{track.index}/{track.total}",
+                    "trackNumber": track.tags["track"],
                     "writtenTags": dict(track.tags),
                 }
             )
 
+        family = metadata_family(preview.tracks[0].path)
         audio.update(
             {
-                "metadataFamily": "id3",
+                "metadataFamily": family,
                 "metadataNormalized": True,
                 "metadataVerification": "passed",
                 "embeddedArtwork": True,
@@ -316,7 +331,7 @@ def apply_multifile_tagging(job_dir: Path) -> MultiTagResult:
         report["metadataNormalization"] = {
             "status": "verified",
             "mode": "multi-file",
-            "metadataFamily": "id3",
+            "metadataFamily": family,
             "fileCount": len(preview.tracks),
             "embeddedCover": True,
             "embeddedCoverSha256": cover_sha,
@@ -409,7 +424,7 @@ def verify_multifile_readiness(job_dir: Path) -> MultiReadinessResult:
             metadata_ok,
             (
                 f"Whole-edition metadata normalization verified for "
-                f"{metadata.get('fileCount')} chapters."
+                f"{metadata.get('fileCount')} files."
                 if metadata_ok
                 else "Whole-edition metadata normalization is not verified."
             ),
@@ -453,7 +468,6 @@ def verify_multifile_readiness(job_dir: Path) -> MultiReadinessResult:
                 expected_tags,
                 expected_cover_sha256=cover_sha,
             )
-            _verify_track_number(path, index, total)
         except (MetadataIOError, MultiFileMetadataError) as exc:
             chapter_errors.append(f"{path.name}: {exc}")
 
@@ -466,8 +480,8 @@ def verify_multifile_readiness(job_dir: Path) -> MultiReadinessResult:
             "chapters-hash-metadata-artwork",
             not chapter_errors,
             (
-                f"SHA-256, canonical ID3 metadata, track order, and embedded "
-                f"cover verified for all {total} chapters."
+                f"SHA-256, canonical metadata, track order, and embedded "
+                f"cover verified for all {total} files."
                 if not chapter_errors
                 else "; ".join(chapter_errors[:3])
             ),
@@ -479,7 +493,7 @@ def verify_multifile_readiness(job_dir: Path) -> MultiReadinessResult:
             "actual-codec-all",
             not quality_errors,
             (
-                f"Actual codec/quality classified for all {total} chapters."
+                f"Actual codec/quality classified for all {total} files."
                 if not quality_errors
                 else f"Unclassified chapters: {', '.join(quality_errors)}"
             ),

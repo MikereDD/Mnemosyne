@@ -10,7 +10,7 @@ from .comparison import ComparisonResult
 from .completion import CompletionPreview, CompletionResult
 from .cleanup import CleanupPreview, CleanupResult
 from .fetcher import FetchResult
-from .inspection import MetadataInspection
+from .inspection import MetadataInspection, MultiFileInspection
 from .models import AcquisitionPlan, CandidateKind
 from .placement import PlacementPreview, PlacementResult
 from .readiness import ReadinessResult
@@ -201,6 +201,7 @@ def render_inspection(result: MetadataInspection) -> None:
     table.add_row("Bitrate", f"{props.bitrate_bps / 1000:.1f} kbps" if props.bitrate_bps else "?")
     table.add_row("Sample rate", f"{props.sample_rate_hz} Hz" if props.sample_rate_hz else "?")
     table.add_row("Channels", str(props.channels) if props.channels else "?")
+    table.add_row("Bit depth", f"{props.bits_per_sample}-bit" if props.bits_per_sample else "?")
     table.add_row("Embedded artwork", str(result.embedded_artwork_count))
     table.add_row("Chapters", str(len(result.chapters)))
     console.print(table)
@@ -231,6 +232,58 @@ def render_inspection(result: MetadataInspection) -> None:
     console.print(proposed)
 
     console.print(Panel(f"[bold]Proposed tag changes: {len(result.changes)}[/bold]\n[bold green]No tags were written.[/bold green]\nThe staged audio and final media library are unchanged.", border_style="green"))
+
+
+def render_multifile_inspection(result: MultiFileInspection) -> None:
+    console.print(Panel.fit("[bold]Mnemosyne[/bold]\n[dim]Read-only multi-file staged inspection[/dim]", border_style="cyan"))
+
+    summary=Table(show_header=False,box=None,pad_edge=False)
+    summary.add_column(style="bold")
+    summary.add_column()
+    summary.add_row("Job",str(result.job_dir))
+    summary.add_row("Audio files",str(len(result.entries)))
+    summary.add_row("Total duration",_duration(result.total_duration_seconds))
+    summary.add_row("Codecs",", ".join(result.codecs) if result.codecs else "?")
+    summary.add_row("Sample rates",", ".join(f"{v} Hz" for v in result.sample_rates_hz) or "?")
+    summary.add_row("Channels",", ".join(str(v) for v in result.channels) or "?")
+    summary.add_row("Bit depths",", ".join(f"{v}-bit" for v in result.bits_per_sample) or "?")
+    console.print(summary)
+
+    files=Table(title="Staged audio inspection")
+    files.add_column("#",justify="right")
+    files.add_column("File")
+    files.add_column("Codec")
+    files.add_column("Duration",justify="right")
+    files.add_column("Bitrate",justify="right")
+    files.add_column("Rate",justify="right")
+    files.add_column("Bits",justify="right")
+    files.add_column("Ch",justify="right")
+    files.add_column("Art",justify="right")
+    files.add_column("Tag changes",justify="right")
+
+    for entry in result.entries:
+        props=entry.properties
+        files.add_row(
+            str(entry.index), entry.audio_path.name, props.codec or "?",
+            _duration(props.duration_seconds),
+            f"{props.bitrate_bps/1000:.1f} kbps" if props.bitrate_bps else "?",
+            f"{props.sample_rate_hz} Hz" if props.sample_rate_hz else "?",
+            str(props.bits_per_sample) if props.bits_per_sample else "?",
+            str(props.channels) if props.channels else "?",
+            str(entry.embedded_artwork_count), str(len(entry.changes)),
+        )
+    console.print(files)
+
+    inconsistent=[]
+    if len(result.codecs)>1: inconsistent.append(f"codecs: {', '.join(result.codecs)}")
+    if len(result.sample_rates_hz)>1: inconsistent.append("sample rates: "+", ".join(str(v) for v in result.sample_rates_hz))
+    if len(result.channels)>1: inconsistent.append("channel counts: "+", ".join(str(v) for v in result.channels))
+    if len(result.bits_per_sample)>1: inconsistent.append("bit depths: "+", ".join(str(v) for v in result.bits_per_sample))
+
+    if inconsistent:
+        console.print(Panel("\n".join(f"• {item}" for item in inconsistent), title="Edition consistency needs attention", border_style="yellow"))
+    else:
+        console.print(Panel("[bold green]Edition properties are internally consistent.[/bold green]\n[bold]No tags were written.[/bold]\nStaged media and the final library are unchanged.", border_style="green"))
 
 
 def render_comparison(result: ComparisonResult) -> None:
@@ -697,7 +750,7 @@ def render_multifile_tag_preview(preview) -> None:
         "[bold]Mnemosyne[/bold]\n[dim]Whole-edition metadata preview[/dim]",
         border_style="cyan",
     ))
-    table = Table(title=f"MP3 chapter metadata ({len(preview.tracks)} files)")
+    table = Table(title=f"Whole-edition metadata ({len(preview.tracks)} files)")
     table.add_column("#", justify="right")
     table.add_column("File")
     table.add_column("Title")
@@ -712,7 +765,7 @@ def render_multifile_tag_preview(preview) -> None:
     console.print(table)
     console.print(Panel(
         "[bold yellow]Preview only.[/bold yellow]\n"
-        "Every chapter will be prepared and verified before canonical staged files are replaced.\n"
+        "Every file will be prepared and verified before canonical staged files are replaced.\n"
         "No staged audio or final-library media was modified.",
         border_style="yellow",
     ))

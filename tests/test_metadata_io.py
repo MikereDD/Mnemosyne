@@ -14,3 +14,9 @@ def test_mp4_rejects_webp_embedding():
 def test_mp4_jpeg_and_png_cover_types():
     assert _mp4_cover_format("image/jpeg")==MP4Cover.FORMAT_JPEG
     assert _mp4_cover_format("image/png")==MP4Cover.FORMAT_PNG
+
+def test_track_number_is_supported_by_id3_and_flac_maps():
+    from mnemosyne.metadata_io import _FLAC_TAG_MAP, _ID3_FRAME_MAP
+    assert "track" in _ID3_FRAME_MAP
+    assert _FLAC_TAG_MAP["track"] == "tracknumber"
+

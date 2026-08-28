@@ -153,7 +153,7 @@ def _resolve_final_audio(
         path = Path(str(entry.get("path") or ""))
         if not path.is_file():
             raise MultiFileCompletionError(
-                f"Final chapter is missing: {path}"
+                f"Final audio file is missing: {path}"
             )
         resolved.append((entry, path))
 
@@ -278,9 +278,9 @@ def preview_multifile_completion(
             "final-audio-files-sha256",
             not file_errors,
             (
-                f"Verified SHA-256 for all {len(audio_paths)} final chapters."
+                f"Verified SHA-256 for all {len(audio_paths)} final audio files."
                 if not file_errors
-                else "Final chapter hash mismatch: "
+                else "Final audio-file hash mismatch: "
                 + ", ".join(file_errors[:3])
             ),
         )
@@ -522,7 +522,7 @@ def preview_multifile_cleanup(
         actual = _sha256(path)
         if not expected or actual != expected:
             raise MultiFileCompletionError(
-                f"Final chapter changed after completion: {path.name}"
+                f"Final audio file changed after completion: {path.name}"
             )
         hashes.append(actual)
 

@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from mutagen.flac import FLAC, Picture
-from mutagen.id3 import APIC, TALB, TCON, TDRC, TIT2, TPE1, TPE2
+from mutagen.id3 import APIC, TALB, TCON, TDRC, TIT2, TPE1, TPE2, TRCK
 from mutagen.mp3 import MP3
 from mutagen.mp4 import MP4, MP4Cover
 
@@ -24,8 +24,8 @@ class MetadataSnapshot:
     artwork: tuple[tuple[str, bytes], ...]
 
 _MP4_TAG_MAP = {"title":"\xa9nam","artist":"\xa9ART","album_artist":"aART","album":"\xa9alb","date":"\xa9day","genre":"\xa9gen"}
-_ID3_FRAME_MAP = {"title":TIT2,"artist":TPE1,"album_artist":TPE2,"album":TALB,"date":TDRC,"genre":TCON}
-_FLAC_TAG_MAP = {"title":"title","artist":"artist","album_artist":"albumartist","album":"album","date":"date","genre":"genre"}
+_ID3_FRAME_MAP = {"title":TIT2,"artist":TPE1,"album_artist":TPE2,"album":TALB,"date":TDRC,"genre":TCON,"track":TRCK}
+_FLAC_TAG_MAP = {"title":"title","artist":"artist","album_artist":"albumartist","album":"album","date":"date","genre":"genre","track":"tracknumber"}
 
 def metadata_family(path: Path) -> str:
     suffix = path.suffix.lower()
