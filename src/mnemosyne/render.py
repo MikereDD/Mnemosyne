@@ -6,6 +6,7 @@ from rich.table import Table
 from rich.text import Text
 
 from .adoption import AdoptionResult
+from .batch import BatchPreview
 from .comparison import ComparisonResult
 from .completion import CompletionPreview, CompletionResult
 from .cleanup import CleanupPreview, CleanupResult
@@ -42,6 +43,74 @@ def _duration(value: float | None) -> str:
     return f"{minutes}:{seconds:02d}"
 
 
+
+
+def render_batch_preview(preview: BatchPreview) -> None:
+    console.print(
+        Panel.fit(
+            "[bold]Mnemosyne[/bold]\n[dim]Fetch-list batch preview[/dim]",
+            border_style="cyan",
+        )
+    )
+
+    summary = Table(show_header=False, box=None, pad_edge=False)
+    summary.add_column(style="bold")
+    summary.add_column()
+    summary.add_row("Media", preview.media_type.value)
+    summary.add_row("Queue", str(preview.queue_path))
+    summary.add_row("Lines", str(preview.total_lines))
+    summary.add_row("Ready items", str(preview.ready_count))
+    summary.add_row("Duplicates", str(preview.duplicate_count))
+    summary.add_row("Invalid", str(preview.invalid_count))
+    summary.add_row("Comments", str(preview.comment_lines))
+    summary.add_row("Blank", str(preview.blank_lines))
+    console.print(summary)
+
+    if preview.items:
+        items = Table(title="Batch items")
+        items.add_column("#", justify="right")
+        items.add_column("Line", justify="right")
+        items.add_column("Provider")
+        items.add_column("Identifier")
+        items.add_column("Canonical URL")
+        for index, item in enumerate(preview.items, start=1):
+            items.add_row(
+                str(index),
+                str(item.line_number),
+                "Internet Archive",
+                item.identifier,
+                item.canonical_url,
+            )
+        console.print(items)
+
+    issues = [*preview.duplicates, *preview.invalid]
+    if issues:
+        issue_table = Table(title="Queue issues")
+        issue_table.add_column("Line", justify="right")
+        issue_table.add_column("Kind")
+        issue_table.add_column("Detail")
+        issue_table.add_column("Source")
+        for issue in sorted(issues, key=lambda value: value.line_number):
+            style = "yellow" if issue.kind == "duplicate" else "red"
+            issue_table.add_row(
+                str(issue.line_number),
+                f"[{style}]{issue.kind.upper()}[/{style}]",
+                issue.detail,
+                issue.source_text.strip(),
+            )
+        console.print(issue_table)
+
+    if not preview.items:
+        console.print("[yellow]No valid batch items are ready.[/yellow]")
+
+    console.print(
+        Panel(
+            "Preview only. No network requests were made.\n"
+            "Queue file modified: NO\n"
+            "Downloads started: NO",
+            border_style="yellow",
+        )
+    )
 
 def render_plan(plan: AcquisitionPlan) -> None:
     item = plan.item

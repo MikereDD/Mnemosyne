@@ -6,6 +6,7 @@ from typing import Annotated
 import typer
 
 from .adoption import AdoptionError, adopt_latest_recommended_source
+from .batch import BatchQueueError, parse_fetch_queue
 from .comparison import ComparisonError, compare_archive_candidates
 from .completion import CompletionError, apply_completion, preview_completion
 from .cleanup import CleanupError, apply_cleanup, preview_cleanup
@@ -46,6 +47,7 @@ from .readiness import ReadinessError, verify_staged_readiness
 from .render import (
     console,
     render_adoption,
+    render_batch_preview,
     render_comparison,
     render_fetch_result,
     render_inspection,
@@ -123,6 +125,30 @@ def init() -> None:
     else:
         console.print("[dim]Runtime structure already exists; nothing changed.[/dim]")
 
+
+
+@app.command("batch")
+def batch_command(
+    media_type: Annotated[
+        MediaType,
+        typer.Argument(help="Media type queue: audiobook, ebook, or music."),
+    ],
+    queue: Annotated[
+        Path | None,
+        typer.Option(
+            "--queue",
+            help="Preview a specific fetch-list file instead of the canonical queue.",
+        ),
+    ] = None,
+) -> None:
+    """Parse and preview a fetch list. Read-only: no network or queue mutation."""
+    try:
+        preview = parse_fetch_queue(media_type, queue)
+    except BatchQueueError as exc:
+        console.print(f"[bold red]Batch preview failed:[/bold red] {exc}")
+        raise typer.Exit(code=20) from exc
+
+    render_batch_preview(preview)
 
 @app.command()
 def plan(
