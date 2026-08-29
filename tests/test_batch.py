@@ -107,6 +107,63 @@ def test_parse_queue_classifies_invalid_entries(
     assert message in preview.invalid[0].detail
 
 
+def test_parse_queue_accepts_verified_year_directive(tmp_path: Path) -> None:
+    queue = _write_queue(
+        tmp_path / "audiobook-links.txt",
+        "https://archive.org/details/edison | year=1898\n",
+    )
+
+    preview = parse_fetch_queue(MediaType.AUDIOBOOK, queue)
+
+    assert preview.ready_count == 1
+    assert preview.invalid_count == 0
+    assert preview.items[0].source_url == "https://archive.org/details/edison"
+    assert preview.items[0].verified_year == 1898
+
+
+@pytest.mark.parametrize(
+    ("entry", "message"),
+    [
+        ("https://archive.org/details/test | year=98", "exactly four decimal digits"),
+        ("https://archive.org/details/test | title=Example", "Unsupported queue directive"),
+        (
+            "https://archive.org/details/test | year=1898 | year=1899",
+            "specified more than once",
+        ),
+        ("https://archive.org/details/test |", "empty directive"),
+    ],
+)
+def test_parse_queue_rejects_invalid_directives(
+    tmp_path: Path,
+    entry: str,
+    message: str,
+) -> None:
+    queue = _write_queue(tmp_path / "audiobook-links.txt", entry + "\n")
+
+    preview = parse_fetch_queue(MediaType.AUDIOBOOK, queue)
+
+    assert preview.ready_count == 0
+    assert preview.invalid_count == 1
+    assert message in preview.invalid[0].detail
+
+
+def test_duplicate_detection_uses_canonical_url_not_directives(
+    tmp_path: Path,
+) -> None:
+    queue = _write_queue(
+        tmp_path / "audiobook-links.txt",
+        "https://archive.org/details/edison | year=1898\n"
+        "https://www.archive.org/details/edison/ | year=2008\n",
+    )
+
+    preview = parse_fetch_queue(MediaType.AUDIOBOOK, queue)
+
+    assert preview.ready_count == 1
+    assert preview.items[0].verified_year == 1898
+    assert preview.duplicate_count == 1
+    assert preview.duplicates[0].detail == "Duplicates line 1."
+
+
 def test_parse_queue_is_read_only(tmp_path: Path) -> None:
     queue = _write_queue(
         tmp_path / "audiobook-links.txt",
@@ -239,7 +296,7 @@ def test_resolve_batch_plans_reports_selected_edition_and_destination(
 ) -> None:
     queue = _write_queue(
         tmp_path / "audiobook-links.txt",
-        "https://archive.org/details/good\n",
+        "https://archive.org/details/good | year=1926\n",
     )
     preview = parse_fetch_queue(MediaType.AUDIOBOOK, queue)
     provider = _FakeProvider(
@@ -250,7 +307,6 @@ def test_resolve_batch_plans_reports_selected_edition_and_destination(
         preview,
         tmp_path / "library",
         provider,
-        verified_year_overrides={"good": 1926},
     )
 
     item = result.items[0]
@@ -258,7 +314,7 @@ def test_resolve_batch_plans_reports_selected_edition_and_destination(
     assert item.title == "Title good"
     assert item.creator == "Example Author"
     assert item.year == 1926
-    assert item.year_provenance == "verified-override"
+    assert item.year_provenance == "verified-queue"
     assert item.audio_file_count == 1
     assert item.selected_edition is not None
     assert item.destination is not None
@@ -322,7 +378,7 @@ def test_verified_year_override_clears_batch_year_provenance_gate(
 ) -> None:
     queue = _write_queue(
         tmp_path / "audiobook-links.txt",
-        "https://archive.org/details/edison\n",
+        "https://archive.org/details/edison | year=1898\n",
     )
     preview = parse_fetch_queue(MediaType.AUDIOBOOK, queue)
     provider = _FakeProvider(
@@ -336,11 +392,40 @@ def test_verified_year_override_clears_batch_year_provenance_gate(
         preview,
         tmp_path / "library",
         provider,
-        verified_year_overrides={"edison": 1898},
     )
 
     item = result.items[0]
     assert item.status == "actionable"
     assert item.year == 1898
-    assert item.year_provenance == "verified-override"
+    assert item.year_provenance == "verified-queue"
     assert not any("provider-derived" in warning for warning in item.warnings)
+
+
+
+def test_conflicting_verified_year_sources_fail_closed(tmp_path: Path) -> None:
+    queue = _write_queue(
+        tmp_path / "audiobook-links.txt",
+        "https://archive.org/details/edison | year=1898\n",
+    )
+    preview = parse_fetch_queue(MediaType.AUDIOBOOK, queue)
+    provider = _FakeProvider(
+        {
+            "https://archive.org/details/edison":
+                _archive_item("edison", year=2008)
+        }
+    )
+
+    result = resolve_batch_plans(
+        preview,
+        tmp_path / "library",
+        provider,
+        verified_year_overrides={"edison": 2008},
+    )
+
+    item = result.items[0]
+    assert item.status == "failed"
+    assert item.year_provenance == "conflict"
+    assert item.error is not None
+    assert "queue=1898" in item.error
+    assert "override=2008" in item.error
+    assert provider.calls == []

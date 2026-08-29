@@ -25,6 +25,7 @@ class BatchItem:
     source_url: str
     canonical_url: str
     identifier: str
+    verified_year: int | None
 
 
 @dataclass(frozen=True)
@@ -109,6 +110,48 @@ def fetch_queue_path(
     return base / "fetch" / filenames[media_type]
 
 
+def _parse_queue_entry(text: str) -> tuple[str, int | None]:
+    parts = [part.strip() for part in text.split("|")]
+    source_url = parts[0]
+
+    if not source_url:
+        raise BatchQueueError("Queue entry is missing a source URL.")
+
+    verified_year: int | None = None
+    seen_directives: set[str] = set()
+
+    for directive in parts[1:]:
+        if not directive:
+            raise BatchQueueError("Queue entry contains an empty directive.")
+
+        key, separator, value = directive.partition("=")
+        key = key.strip().lower()
+        value = value.strip()
+
+        if not separator or not key or not value:
+            raise BatchQueueError("Queue directives must use key=value syntax.")
+
+        if key in seen_directives:
+            raise BatchQueueError(
+                f"Queue directive '{key}' was specified more than once."
+            )
+        seen_directives.add(key)
+
+        if key != "year":
+            raise BatchQueueError(
+                f"Unsupported queue directive '{key}'. Supported directives: year."
+            )
+
+        if not re.fullmatch(r"\d{4}", value):
+            raise BatchQueueError(
+                "Verified year must be exactly four decimal digits."
+            )
+
+        verified_year = int(value)
+
+    return source_url, verified_year
+
+
 def _normalize_archive_url(text: str) -> tuple[str, str]:
     try:
         parsed = urlsplit(text)
@@ -185,7 +228,8 @@ def parse_fetch_queue(
             continue
 
         try:
-            canonical_url, identifier = _normalize_archive_url(stripped)
+            source_url, verified_year = _parse_queue_entry(stripped)
+            canonical_url, identifier = _normalize_archive_url(source_url)
         except BatchQueueError as exc:
             invalid.append(
                 BatchIssue(
@@ -212,9 +256,10 @@ def parse_fetch_queue(
         items.append(
             BatchItem(
                 line_number=line_number,
-                source_url=stripped,
+                source_url=source_url,
                 canonical_url=canonical_url,
                 identifier=identifier,
+                verified_year=verified_year,
             )
         )
 
@@ -252,7 +297,42 @@ def resolve_batch_plans(
     verified_years = verified_year_overrides or {}
 
     for item in preview.items:
-        verified_year = verified_years.get(item.identifier)
+        external_verified_year = verified_years.get(item.identifier)
+
+        if (
+            item.verified_year is not None
+            and external_verified_year is not None
+            and item.verified_year != external_verified_year
+        ):
+            resolved.append(
+                BatchPlanItem(
+                    line_number=item.line_number,
+                    canonical_url=item.canonical_url,
+                    identifier=item.identifier,
+                    status="failed",
+                    title=None,
+                    creator=None,
+                    year=None,
+                    year_provenance="conflict",
+                    destination=None,
+                    selected_edition=None,
+                    audio_file_count=0,
+                    warning_count=0,
+                    warnings=(),
+                    error=(
+                        "Conflicting verified year values: "
+                        f"queue={item.verified_year}, "
+                        f"override={external_verified_year}."
+                    ),
+                )
+            )
+            continue
+
+        verified_year = (
+            item.verified_year
+            if item.verified_year is not None
+            else external_verified_year
+        )
 
         try:
             archive_item = provider.identify(
@@ -283,7 +363,14 @@ def resolve_batch_plans(
             continue
 
         warnings_list = list(plan.warnings)
-        year_provenance = "verified-override" if verified_year is not None else "provider"
+        if item.verified_year is not None:
+            year_provenance = "verified-queue"
+        elif external_verified_year is not None:
+            year_provenance = "verified-override"
+        elif plan.item.year is None:
+            year_provenance = "missing"
+        else:
+            year_provenance = "provider"
 
         if (
             preview.media_type is MediaType.AUDIOBOOK
