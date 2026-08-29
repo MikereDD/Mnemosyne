@@ -202,15 +202,23 @@ def preview_multifile_completion(
 
     placed_state = (
         fetch.get("status") == "placed-and-verified"
-        and bool(fetch.get("finalLibraryModified"))
+        and (
+            bool(fetch.get("finalLibraryModified"))
+            or bool(fetch.get("finalLibraryVerifiedEquivalent"))
+        )
     )
     checks.append(
         MultiCompletionCheck(
             "placed-state",
             placed_state,
             (
-                "Fetch report records placed-and-verified "
-                "with finalLibraryModified=true."
+                (
+                    "Fetch report records placed-and-verified with a newly written "
+                    "final library destination."
+                    if bool(fetch.get("finalLibraryModified"))
+                    else "Fetch report records placed-and-verified by equivalence "
+                    "with an existing final library destination."
+                )
                 if placed_state
                 else "Fetch report is not in verified placed state."
             ),

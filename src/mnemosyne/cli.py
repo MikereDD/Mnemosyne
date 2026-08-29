@@ -5,7 +5,7 @@ from typing import Annotated
 
 import typer
 
-from .adoption import AdoptionError, adopt_latest_recommended_source
+from .adoption import AdoptionError, adopt_latest_recommended_edition
 from .batch import (
     BatchQueueError,
     build_batch_execution_preview,
@@ -14,6 +14,10 @@ from .batch import (
     resolve_batch_plans,
 )
 from .batch_lifecycle import build_batch_lifecycle_preview
+from .batch_source_resolution import (
+    build_batch_source_resolution_preview,
+    execute_batch_source_resolution,
+)
 from .comparison import ComparisonError, compare_archive_candidates
 from .completion import CompletionError, apply_completion, preview_completion
 from .cleanup import CleanupError, apply_cleanup, preview_cleanup
@@ -62,6 +66,8 @@ from .render import (
     render_batch_execution_preview,
     render_batch_fetch_summary,
     render_batch_lifecycle_preview,
+    render_batch_source_resolution_preview,
+    render_batch_source_resolution_summary,
     render_batch_plan_preview,
     render_batch_preview,
     render_comparison,
@@ -388,9 +394,9 @@ def compare_command(
 @app.command("adopt")
 def adopt_command(
     job: Annotated[Path | None, typer.Argument(help="Staging job directory. Omit to use the most recent completed job.")] = None,
-    apply: Annotated[bool, typer.Option("--apply", help="Transactionally adopt the latest comparison winner into the staged canonical slot.")] = False,
+    apply: Annotated[bool, typer.Option("--apply", help="Transactionally adopt the latest complete-edition comparison winner into staging.")] = False,
 ) -> None:
-    """Adopt the latest verified comparison winner inside staging."""
+    """Adopt the latest verified complete audio-edition winner inside staging."""
     try:
         job_dir = job if job is not None else latest_staging_job()
     except InspectionError as exc:
@@ -401,17 +407,29 @@ def adopt_command(
         console.print(
             f"[bold]Adoption target:[/bold] {job_dir}\n"
             "[yellow]No staged source changed.[/yellow] "
-            "Re-run with [bold]--apply[/bold] to adopt the latest verified comparison winner."
+            "Re-run with [bold]--apply[/bold] to adopt the latest verified complete-edition winner."
         )
         return
 
     try:
-        result = adopt_latest_recommended_source(job_dir)
+        result = adopt_latest_recommended_edition(job_dir)
     except (AdoptionError, OSError) as exc:
         console.print(f"[bold red]Adoption failed:[/bold red] {exc}")
         raise typer.Exit(code=10) from exc
 
-    render_adoption(result)
+    console.print("[bold green]WHOLE EDITION ADOPTED + VERIFIED[/bold green]")
+    console.print(f"[bold]Recommended edition:[/bold] {result.recommended_label}")
+    console.print(
+        f"[bold]Audio mode:[/bold] "
+        f"{'multi-file' if result.multi_file else 'single-file'}"
+    )
+    console.print(f"[bold]Files:[/bold] {len(result.canonical_paths)}")
+    for path in result.canonical_paths:
+        console.print(f"  [green]✓[/green] {path}")
+    console.print(f"[bold]Rollback:[/bold] {result.backup_dir}")
+    console.print(f"[bold]Comparison report:[/bold] {result.comparison_report_path}")
+    console.print(f"[bold]Updated fetch report:[/bold] {result.report_path}")
+    console.print("[bold green]Final library modified: NO[/bold green]")
 
 
 
@@ -735,6 +753,68 @@ def recover_quality_command(
         "Audio modified: NO\n"
         "Library modified: NO"
     )
+
+
+
+@app.command("batch-resolve-sources")
+def batch_resolve_sources_command(
+    media_type: Annotated[
+        MediaType,
+        typer.Argument(help="Media type queue. This slice currently targets audiobooks."),
+    ],
+    queue: Annotated[
+        Path | None,
+        typer.Option("--queue", help="Use a specific fetch-list file."),
+    ] = None,
+    apply: Annotated[
+        bool,
+        typer.Option(
+            "--apply",
+            help=(
+                "Download comparison candidates for COMPARE REQUIRED jobs, rank actual "
+                "quality, and transactionally adopt the winner in staging."
+            ),
+        ),
+    ] = False,
+) -> None:
+    """Preview or apply source comparison/resolution for eligible batch staging jobs."""
+
+    if media_type is not MediaType.AUDIOBOOK:
+        console.print(
+            "[bold red]Batch source resolution blocked:[/bold red] "
+            "this slice currently supports audiobook queues only."
+        )
+        raise typer.Exit(code=28)
+
+    try:
+        preview = parse_fetch_queue(media_type, queue)
+    except BatchQueueError as exc:
+        console.print(f"[bold red]Batch source resolution failed:[/bold red] {exc}")
+        raise typer.Exit(code=28) from exc
+
+    if not preview.items:
+        console.print("[yellow]No valid queue items are available to resolve.[/yellow]")
+        return
+
+    config = load_config()
+    provider = ArchiveOrgProvider()
+    plan_preview = resolve_batch_plans(preview, config.library_root, provider)
+    lifecycle_preview = build_batch_lifecycle_preview(
+        plan_preview,
+        runtime_root() / "staging",
+        runtime_root() / "state",
+    )
+    source_preview = build_batch_source_resolution_preview(lifecycle_preview)
+    render_batch_source_resolution_preview(source_preview)
+
+    if not apply:
+        return
+
+    summary = execute_batch_source_resolution(source_preview)
+    render_batch_source_resolution_summary(summary)
+
+    if summary.failed_count:
+        raise typer.Exit(code=29)
 
 
 if __name__ == "__main__":

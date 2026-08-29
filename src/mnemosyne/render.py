@@ -13,6 +13,10 @@ from .batch import (
     BatchPreview,
 )
 from .batch_lifecycle import BatchLifecyclePreview
+from .batch_source_resolution import (
+    BatchSourceResolutionPreview,
+    BatchSourceResolutionSummary,
+)
 from .comparison import ComparisonResult
 from .completion import CompletionPreview, CompletionResult
 from .cleanup import CleanupPreview, CleanupResult
@@ -312,6 +316,101 @@ def render_batch_lifecycle_preview(preview: BatchLifecyclePreview) -> None:
             "Downloads started: NO\n"
             "Staging modified: NO\n"
             "Library modified: NO\n"
+            "Queue modified: NO",
+            border_style="yellow",
+        )
+    )
+
+
+def render_batch_source_resolution_preview(
+    preview: BatchSourceResolutionPreview,
+) -> None:
+    console.print(
+        Panel.fit(
+            "[bold]Mnemosyne[/bold]\n[dim]Batch source-resolution preview[/dim]",
+            border_style="cyan",
+        )
+    )
+
+    table = Table(title="Source resolution")
+    table.add_column("Line", justify="right")
+    table.add_column("Action")
+    table.add_column("Identifier")
+    table.add_column("Job")
+    table.add_column("Detail")
+
+    for item in preview.items:
+        action = (
+            "[cyan]WOULD RESOLVE[/cyan]"
+            if item.status == "would-resolve"
+            else "[dim]SKIP[/dim]"
+        )
+        table.add_row(
+            str(item.line_number),
+            action,
+            item.identifier,
+            item.job_id or "—",
+            item.detail,
+        )
+
+    console.print(table)
+    console.print(
+        Panel(
+            f"Eligible jobs: {preview.actionable_count}\n"
+            "Dry-run only. No comparison downloads have started.\n"
+            "Final library modified: NO\n"
+            "Queue modified: NO",
+            border_style="yellow",
+        )
+    )
+
+
+def render_batch_source_resolution_summary(
+    summary: BatchSourceResolutionSummary,
+) -> None:
+    console.print(
+        Panel.fit(
+            "[bold]Mnemosyne[/bold]\n[dim]Batch source-resolution result[/dim]",
+            border_style="cyan",
+        )
+    )
+
+    console.print(f"Resolved  {summary.resolved_count}")
+    console.print(f"Failed    {summary.failed_count}")
+    console.print(f"Skipped   {summary.skipped_count}")
+
+    table = Table(title="Source-resolution results")
+    table.add_column("Line", justify="right")
+    table.add_column("Status")
+    table.add_column("Identifier")
+    table.add_column("Recommended")
+    table.add_column("Adopted staged path / Error")
+
+    for item in summary.results:
+        if item.status == "resolved":
+            status = "[green]RESOLVED[/green]"
+            detail = str(item.adopted_path or "—")
+        elif item.status == "failed":
+            status = "[red]FAILED[/red]"
+            detail = item.error or "Unknown failure"
+        else:
+            status = "[dim]SKIPPED[/dim]"
+            detail = "—"
+
+        table.add_row(
+            str(item.line_number),
+            status,
+            item.identifier,
+            item.recommended_source or "—",
+            detail,
+        )
+
+    console.print(table)
+    console.print(
+        Panel(
+            "Comparison candidates may have been downloaded into staging.\n"
+            "Winning source adoption is transactional with rollback evidence.\n"
+            "Final library modified: NO\n"
             "Queue modified: NO",
             border_style="yellow",
         )
@@ -640,26 +739,43 @@ def render_multifile_inspection(result: MultiFileInspection) -> None:
 
 
 def render_comparison(result: ComparisonResult) -> None:
-    console.print(Panel.fit("[bold]Mnemosyne[/bold]\n[dim]Actual candidate quality comparison[/dim]", border_style="cyan"))
-    table = Table(title="Downloaded candidate comparison")
+    console.print(
+        Panel.fit(
+            "[bold]Mnemosyne[/bold]\n[dim]Complete audio-edition quality comparison[/dim]",
+            border_style="cyan",
+        )
+    )
+    table = Table(title="Downloaded edition comparison")
     table.add_column("Rank", justify="right")
-    table.add_column("Source file")
-    table.add_column("Archive label")
+    table.add_column("Edition")
+    table.add_column("Files", justify="right")
+    table.add_column("Format")
     table.add_column("Actual codec")
     table.add_column("Quality")
-    table.add_column("Bitrate", justify="right")
-    table.add_column("Size", justify="right")
+    table.add_column("Median bitrate", justify="right")
+    table.add_column("Total size", justify="right")
     table.add_column("Score", justify="right")
 
-    for index, compared in enumerate(result.candidates, start=1):
-        actual = compared.actual
-        quality = "lossless" if actual.lossless is True else "lossy" if actual.lossless is False else "unknown"
-        bitrate = f"{actual.bitrate_bps / 1000:.1f} kbps" if actual.bitrate_bps else "?"
+    for index, compared in enumerate(result.editions, start=1):
+        actual = compared.representative_quality
+        quality = (
+            "lossless"
+            if actual.lossless is True
+            else "lossy"
+            if actual.lossless is False
+            else "mixed/unknown"
+        )
+        bitrate = (
+            f"{actual.bitrate_bps / 1000:.1f} kbps"
+            if actual.bitrate_bps
+            else "?"
+        )
         rank = f"[green]{index} ✓[/green]" if compared is result.recommended else str(index)
         table.add_row(
             rank,
-            compared.candidate.name,
-            compared.candidate.archive_format or "?",
+            compared.edition.label,
+            str(len(compared.files)),
+            compared.edition.archive_format or compared.edition.extension,
             actual.codec or "?",
             quality,
             bitrate,
@@ -670,8 +786,8 @@ def render_comparison(result: ComparisonResult) -> None:
     console.print(table)
     console.print(
         Panel(
-            f"[bold]Recommended actual source:[/bold] {result.recommended.candidate.name}\n"
-            f"[bold]Actual codec:[/bold] {result.recommended.actual.codec or '?'}\n"
+            f"[bold]Recommended complete edition:[/bold] {result.recommended.edition.label}\n"
+            f"[bold]Files:[/bold] {len(result.recommended.files)}\n"
             f"[bold]Comparison report:[/bold] {result.report_path}\n\n"
             "[bold green]Final library modified: NO[/bold green]",
             border_style="green",
@@ -1185,16 +1301,32 @@ def render_multifile_placement_preview(preview) -> None:
     table.add_row("Audio files", str(len(preview.audio_sources)))
     table.add_row("Edition SHA-256", preview.edition_sha256)
     table.add_row("Cover SHA-256", preview.cover_sha256)
+    if getattr(preview, "existing_destination_equivalent", False):
+        table.add_row("Placement mode", "Verified existing destination")
     console.print(table)
+
+    if getattr(preview, "existing_destination_equivalent", False):
+        detail = (
+            "[bold yellow]Preview only.[/bold yellow]\n"
+            "The existing destination has been verified equivalent to the certified staged edition.\n"
+            "Apply records placement provenance only; existing library media will not be rewritten."
+        )
+    else:
+        detail = (
+            "[bold yellow]Preview only.[/bold yellow]\n"
+            "Apply copies the entire edition into a hidden sibling directory, "
+            "verifies it, then commits with one directory rename."
+        )
+
     console.print(Panel(
-        "[bold yellow]Preview only.[/bold yellow]\n"
-        "Apply copies the entire edition into a hidden sibling directory, "
-        "verifies it, then commits with one directory rename.",
+        detail,
         border_style="yellow",
     ))
 
 
 def render_multifile_placement_result(result) -> None:
+    existing = bool(getattr(result, "verified_existing_destination", False))
+
     table = Table(show_header=False, box=None, pad_edge=False)
     table.add_column(style="bold")
     table.add_column()
@@ -1204,16 +1336,39 @@ def render_multifile_placement_result(result) -> None:
     table.add_row("Cover", str(result.cover_path))
     table.add_row("Cover SHA-256", result.cover_sha256)
     table.add_row("Placement report", str(result.placement_report_path))
+    if existing:
+        table.add_row("Placement mode", "Verified existing destination")
+
+    title = (
+        "[bold green]EXISTING MULTI-FILE DESTINATION VERIFIED[/bold green]"
+        if existing
+        else "[bold green]MULTI-FILE PLACED + VERIFIED[/bold green]"
+    )
+
     console.print(Panel(
         table,
-        title="[bold green]MULTI-FILE PLACED + VERIFIED[/bold green]",
+        title=title,
         border_style="green",
     ))
+
+    if existing:
+        detail = (
+            "[bold]Existing destination overwritten: NO[/bold]\n"
+            "[bold]Existing destination equivalence verification: PASSED[/bold]\n"
+            "[bold]Existing library media rewritten: NO[/bold]\n"
+            "[bold]Final library modified: NO[/bold]\n"
+            "[bold]Placement provenance updated: YES[/bold]"
+        )
+    else:
+        detail = (
+            "[bold]Existing destination overwritten: NO[/bold]\n"
+            "[bold]Pre-commit whole-edition verification: PASSED[/bold]\n"
+            "[bold]Post-placement whole-edition verification: PASSED[/bold]\n"
+            "[bold]Final library modified: YES[/bold]"
+        )
+
     console.print(Panel(
-        "[bold]Existing destination overwritten: NO[/bold]\n"
-        "[bold]Pre-commit whole-edition verification: PASSED[/bold]\n"
-        "[bold]Post-placement whole-edition verification: PASSED[/bold]\n"
-        "[bold]Final library modified: YES[/bold]",
+        detail,
         border_style="cyan",
     ))
 
