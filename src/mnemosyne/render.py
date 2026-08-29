@@ -12,6 +12,7 @@ from .batch import (
     BatchPlanPreview,
     BatchPreview,
 )
+from .batch_lifecycle import BatchLifecyclePreview
 from .comparison import ComparisonResult
 from .completion import CompletionPreview, CompletionResult
 from .cleanup import CleanupPreview, CleanupResult
@@ -261,6 +262,57 @@ def render_batch_execution_preview(preview: BatchExecutionPreview) -> None:
             "Staging modified: NO\n"
             "Queue file modified: NO\n"
             "Library modified: NO",
+            border_style="yellow",
+        )
+    )
+
+
+def render_batch_lifecycle_preview(preview: BatchLifecyclePreview) -> None:
+    console.print(
+        Panel.fit(
+            "[bold]Mnemosyne[/bold]\n[dim]Batch lifecycle plan[/dim]",
+            border_style="cyan",
+        )
+    )
+
+    table = Table(title="Audiobook lifecycle state")
+    table.add_column("Line", justify="right")
+    table.add_column("Status")
+    table.add_column("Identifier")
+    table.add_column("Job")
+    table.add_column("Next / Detail")
+
+    labels = {
+        "blocked": "[yellow]BLOCKED[/yellow]",
+        "plan-failed": "[red]PLAN FAILED[/red]",
+        "retry-required": "[yellow]RETRY REQUIRED[/yellow]",
+        "not-staged": "[dim]NOT STAGED[/dim]",
+        "needs-attention": "[yellow]NEEDS ATTENTION[/yellow]",
+        "compare-required": "[cyan]COMPARE REQUIRED[/cyan]",
+        "ready-to-tag": "[cyan]READY TO TAG[/cyan]",
+        "verify-readiness": "[cyan]VERIFY READINESS[/cyan]",
+        "ready-to-place": "[green]READY TO PLACE[/green]",
+        "ready-to-complete": "[green]READY TO COMPLETE[/green]",
+        "complete": "[bold green]COMPLETE[/bold green]",
+    }
+
+    for item in preview.items:
+        table.add_row(
+            str(item.line_number),
+            labels.get(item.status, item.status.upper()),
+            item.identifier,
+            item.job_id or "—",
+            item.detail,
+        )
+
+    console.print(table)
+    console.print(
+        Panel(
+            "Read-only lifecycle inspection.\n"
+            "Downloads started: NO\n"
+            "Staging modified: NO\n"
+            "Library modified: NO\n"
+            "Queue modified: NO",
             border_style="yellow",
         )
     )

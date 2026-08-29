@@ -13,6 +13,7 @@ from .batch import (
     parse_fetch_queue,
     resolve_batch_plans,
 )
+from .batch_lifecycle import build_batch_lifecycle_preview
 from .comparison import ComparisonError, compare_archive_candidates
 from .completion import CompletionError, apply_completion, preview_completion
 from .cleanup import CleanupError, apply_cleanup, preview_cleanup
@@ -55,6 +56,7 @@ from .render import (
     render_adoption,
     render_batch_execution_preview,
     render_batch_fetch_summary,
+    render_batch_lifecycle_preview,
     render_batch_plan_preview,
     render_batch_preview,
     render_comparison,
@@ -189,6 +191,16 @@ def batch_command(
             ),
         ),
     ] = False,
+    lifecycle_plan: Annotated[
+        bool,
+        typer.Option(
+            "--lifecycle-plan",
+            help=(
+                "Inspect durable batch/staging state and show the next lifecycle "
+                "action for every resolved item. Read-only."
+            ),
+        ),
+    ] = False,
 ) -> None:
     if retry_failed and not apply:
         console.print(
@@ -204,7 +216,7 @@ def batch_command(
 
     render_batch_preview(preview)
 
-    if not resolve_plans and not execution_plan and not apply:
+    if not resolve_plans and not execution_plan and not apply and not lifecycle_plan:
         return
 
     if not preview.items:
@@ -220,6 +232,14 @@ def batch_command(
     )
     render_batch_plan_preview(plan_preview)
 
+    if lifecycle_plan and not apply:
+        lifecycle_preview = build_batch_lifecycle_preview(
+            plan_preview,
+            runtime_root() / "staging",
+            runtime_root() / "state",
+        )
+        render_batch_lifecycle_preview(lifecycle_preview)
+
     if execution_plan or apply:
         execution_preview = build_batch_execution_preview(plan_preview)
         render_batch_execution_preview(execution_preview)
@@ -231,6 +251,14 @@ def batch_command(
             retry_failed=retry_failed,
         )
         render_batch_fetch_summary(fetch_summary)
+
+        if lifecycle_plan:
+            lifecycle_preview = build_batch_lifecycle_preview(
+                plan_preview,
+                runtime_root() / "staging",
+                runtime_root() / "state",
+            )
+            render_batch_lifecycle_preview(lifecycle_preview)
 
         if (
             fetch_summary.failed_count

@@ -18,6 +18,7 @@ class BatchStateError(RuntimeError):
 _RESUMABLE_FETCH_STATUSES = {
     "staged-normalized",
     "needs-attention",
+    "staged-metadata-normalized",
     "tagged-normalized",
     "ready-for-placement",
     "placed-and-verified",
