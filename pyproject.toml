@@ -19,7 +19,7 @@ mnemosyne = "mnemosyne.cli:app"
 
 [dependency-groups]
 dev = [
-    "pytest>=8.2,<9",
+    "pytest>=9.0.3,<10",
 ]
 
 [build-system]
