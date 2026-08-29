@@ -6,7 +6,7 @@ from rich.table import Table
 from rich.text import Text
 
 from .adoption import AdoptionResult
-from .batch import BatchPreview
+from .batch import BatchPlanPreview, BatchPreview
 from .comparison import ComparisonResult
 from .completion import CompletionPreview, CompletionResult
 from .cleanup import CleanupPreview, CleanupResult
@@ -108,6 +108,86 @@ def render_batch_preview(preview: BatchPreview) -> None:
             "Preview only. No network requests were made.\n"
             "Queue file modified: NO\n"
             "Downloads started: NO",
+            border_style="yellow",
+        )
+    )
+
+
+
+def render_batch_plan_preview(preview: BatchPlanPreview) -> None:
+    console.print(
+        Panel.fit(
+            "[bold]Mnemosyne[/bold]\n[dim]Batch acquisition plan resolution[/dim]",
+            border_style="cyan",
+        )
+    )
+
+    summary = Table(show_header=False, box=None, pad_edge=False)
+    summary.add_column(style="bold")
+    summary.add_column()
+    summary.add_row("Resolved", str(len(preview.items)))
+    summary.add_row("Actionable", str(preview.actionable_count))
+    summary.add_row("Blocked", str(preview.blocked_count))
+    summary.add_row("Failed", str(preview.failed_count))
+    console.print(summary)
+
+    table = Table(title="Resolved batch plans")
+    table.add_column("#", justify="right")
+    table.add_column("Line", justify="right")
+    table.add_column("Status")
+    table.add_column("Title")
+    table.add_column("Creator")
+    table.add_column("Year")
+    table.add_column("Year source")
+    table.add_column("Edition")
+    table.add_column("Files", justify="right")
+    table.add_column("Warnings", justify="right")
+
+    for index, item in enumerate(preview.items, start=1):
+        if item.status == "actionable":
+            status = "[green]ACTIONABLE[/green]"
+        elif item.status == "blocked":
+            status = "[yellow]BLOCKED[/yellow]"
+        else:
+            status = "[red]FAILED[/red]"
+
+        table.add_row(
+            str(index),
+            str(item.line_number),
+            status,
+            item.title or "?",
+            item.creator or "?",
+            str(item.year) if item.year else "?",
+            item.year_provenance,
+            item.selected_edition or "?",
+            str(item.audio_file_count),
+            str(item.warning_count),
+        )
+    console.print(table)
+
+    for item in preview.items:
+        if item.error:
+            console.print(
+                f"[red]Line {item.line_number} {item.identifier}:[/red] {item.error}"
+            )
+            continue
+        if item.warnings:
+            console.print(
+                f"[yellow]Line {item.line_number} {item.identifier} warnings:[/yellow]"
+            )
+            for warning in item.warnings:
+                console.print(f"  • {warning}")
+        if item.destination is not None:
+            console.print(
+                f"[dim]Line {item.line_number} destination:[/dim] {item.destination}"
+            )
+
+    console.print(
+        Panel(
+            "Plan resolution may read provider metadata over the network.\n"
+            "Media downloads started: NO\n"
+            "Queue file modified: NO\n"
+            "Library modified: NO",
             border_style="yellow",
         )
     )

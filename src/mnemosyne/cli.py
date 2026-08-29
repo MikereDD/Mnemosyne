@@ -6,7 +6,11 @@ from typing import Annotated
 import typer
 
 from .adoption import AdoptionError, adopt_latest_recommended_source
-from .batch import BatchQueueError, parse_fetch_queue
+from .batch import (
+    BatchQueueError,
+    parse_fetch_queue,
+    resolve_batch_plans,
+)
 from .comparison import ComparisonError, compare_archive_candidates
 from .completion import CompletionError, apply_completion, preview_completion
 from .cleanup import CleanupError, apply_cleanup, preview_cleanup
@@ -47,6 +51,7 @@ from .readiness import ReadinessError, verify_staged_readiness
 from .render import (
     console,
     render_adoption,
+    render_batch_plan_preview,
     render_batch_preview,
     render_comparison,
     render_fetch_result,
@@ -140,8 +145,17 @@ def batch_command(
             help="Preview a specific fetch-list file instead of the canonical queue.",
         ),
     ] = None,
+    resolve_plans: Annotated[
+        bool,
+        typer.Option(
+            "--resolve-plans",
+            help=(
+                "Retrieve provider metadata and resolve each valid queue item "
+                "into an acquisition plan. Still performs no downloads."
+            ),
+        ),
+    ] = False,
 ) -> None:
-    """Parse and preview a fetch list. Read-only: no network or queue mutation."""
     try:
         preview = parse_fetch_queue(media_type, queue)
     except BatchQueueError as exc:
@@ -149,6 +163,25 @@ def batch_command(
         raise typer.Exit(code=20) from exc
 
     render_batch_preview(preview)
+
+    if not resolve_plans:
+        return
+
+    if not preview.items:
+        console.print("[yellow]No valid queue items are available to resolve.[/yellow]")
+        return
+
+    config = load_config()
+    provider = ArchiveOrgProvider()
+    plan_preview = resolve_batch_plans(
+        preview,
+        config.library_root,
+        provider,
+    )
+    render_batch_plan_preview(plan_preview)
+
+    if plan_preview.failed_count:
+        raise typer.Exit(code=21)
 
 @app.command()
 def plan(

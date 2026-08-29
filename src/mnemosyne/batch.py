@@ -6,7 +6,9 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from .config import runtime_root
-from .models import MediaType
+from .models import AcquisitionPlan, MediaType
+from .planner import build_plan
+from .providers.base import ProviderError
 
 
 _ARCHIVE_HOSTS = {"archive.org", "www.archive.org"}
@@ -55,6 +57,42 @@ class BatchPreview:
     @property
     def invalid_count(self) -> int:
         return len(self.invalid)
+
+
+@dataclass(frozen=True)
+class BatchPlanItem:
+    line_number: int
+    canonical_url: str
+    identifier: str
+    status: str
+    title: str | None
+    creator: str | None
+    year: int | None
+    year_provenance: str
+    destination: Path | None
+    selected_edition: str | None
+    audio_file_count: int
+    warning_count: int
+    warnings: tuple[str, ...]
+    error: str | None
+
+
+@dataclass(frozen=True)
+class BatchPlanPreview:
+    queue: BatchPreview
+    items: tuple[BatchPlanItem, ...]
+
+    @property
+    def actionable_count(self) -> int:
+        return sum(item.status == "actionable" for item in self.items)
+
+    @property
+    def blocked_count(self) -> int:
+        return sum(item.status == "blocked" for item in self.items)
+
+    @property
+    def failed_count(self) -> int:
+        return sum(item.status == "failed" for item in self.items)
 
 
 def fetch_queue_path(
@@ -190,3 +228,93 @@ def parse_fetch_queue(
         duplicates=tuple(duplicates),
         invalid=tuple(invalid),
     )
+
+
+
+def _selected_edition_label(plan: AcquisitionPlan) -> str | None:
+    if not plan.selected_edition_key:
+        return None
+    for edition in plan.audio_editions:
+        if edition.key == plan.selected_edition_key:
+            return edition.label
+    return None
+
+
+def resolve_batch_plans(
+    preview: BatchPreview,
+    library_root: Path,
+    provider,
+    *,
+    verified_year_overrides: dict[str, int] | None = None,
+) -> BatchPlanPreview:
+    resolved: list[BatchPlanItem] = []
+
+    verified_years = verified_year_overrides or {}
+
+    for item in preview.items:
+        verified_year = verified_years.get(item.identifier)
+
+        try:
+            archive_item = provider.identify(
+                item.canonical_url,
+                preview.media_type,
+                year_override=verified_year,
+            )
+            plan = build_plan(archive_item, library_root)
+        except (ProviderError, OSError, ValueError) as exc:
+            resolved.append(
+                BatchPlanItem(
+                    line_number=item.line_number,
+                    canonical_url=item.canonical_url,
+                    identifier=item.identifier,
+                    status="failed",
+                    title=None,
+                    creator=None,
+                    year=None,
+                    year_provenance="unresolved",
+                    destination=None,
+                    selected_edition=None,
+                    audio_file_count=0,
+                    warning_count=0,
+                    warnings=(),
+                    error=str(exc),
+                )
+            )
+            continue
+
+        warnings_list = list(plan.warnings)
+        year_provenance = "verified-override" if verified_year is not None else "provider"
+
+        if (
+            preview.media_type is MediaType.AUDIOBOOK
+            and verified_year is None
+            and plan.item.year is not None
+        ):
+            warnings_list.append(
+                "Publication/release year is provider-derived and has not been "
+                "verified for canonical audiobook placement. Supply a verified "
+                "year override before applying."
+            )
+
+        warnings = tuple(warnings_list)
+        status = "blocked" if warnings else "actionable"
+        resolved.append(
+            BatchPlanItem(
+                line_number=item.line_number,
+                canonical_url=item.canonical_url,
+                identifier=item.identifier,
+                status=status,
+                title=plan.item.title,
+                creator=plan.item.creator,
+                year=plan.item.year,
+                year_provenance=year_provenance,
+                destination=plan.destination,
+                selected_edition=_selected_edition_label(plan),
+                audio_file_count=len(plan.selected_audio),
+                warning_count=len(warnings),
+                warnings=warnings,
+                error=None,
+            )
+        )
+
+    return BatchPlanPreview(queue=preview, items=tuple(resolved))

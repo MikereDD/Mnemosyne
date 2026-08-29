@@ -4,8 +4,19 @@ from pathlib import Path
 
 import pytest
 
-from mnemosyne.batch import BatchQueueError, fetch_queue_path, parse_fetch_queue
-from mnemosyne.models import MediaType
+from mnemosyne.batch import (
+    BatchQueueError,
+    fetch_queue_path,
+    parse_fetch_queue,
+    resolve_batch_plans,
+)
+from mnemosyne.models import (
+    ArchiveItem,
+    CandidateKind,
+    MediaCandidate,
+    MediaType,
+)
+from mnemosyne.providers.base import ProviderError
 
 
 def _write_queue(path: Path, text: str) -> Path:
@@ -115,3 +126,221 @@ def test_parse_queue_missing_file_fails_safely(tmp_path: Path) -> None:
 
     with pytest.raises(BatchQueueError, match="does not exist"):
         parse_fetch_queue(MediaType.AUDIOBOOK, missing)
+
+
+
+class _FakeProvider:
+    def __init__(self, items: dict[str, ArchiveItem | Exception]) -> None:
+        self.items = items
+        self.calls: list[str] = []
+
+    def identify(
+        self,
+        url: str,
+        media_type: MediaType,
+        *,
+        year_override: int | None = None,
+    ) -> ArchiveItem:
+        self.calls.append(url)
+        result = self.items[url]
+
+        if isinstance(result, Exception):
+            raise result
+
+        assert result.media_type is media_type
+
+        if year_override is not None:
+            result = result.model_copy(update={"year": year_override})
+
+        return result
+
+def _archive_item(
+    identifier: str,
+    *,
+    creator: str | None = "Example Author",
+    year: int | None = 2026,
+    with_audio: bool = True,
+    with_cover: bool = True,
+) -> ArchiveItem:
+    candidates: list[MediaCandidate] = []
+    if with_audio:
+        candidates.append(
+            MediaCandidate(
+                name=f"{identifier}.mp3",
+                url=f"https://archive.org/download/{identifier}/{identifier}.mp3",
+                extension=".mp3",
+                archive_format="VBR MP3",
+                source="original",
+                size=1000,
+                kind=CandidateKind.AUDIO,
+                playable=True,
+                score=700,
+            )
+        )
+    if with_cover:
+        candidates.append(
+            MediaCandidate(
+                name="cover.jpg",
+                url=f"https://archive.org/download/{identifier}/cover.jpg",
+                extension=".jpg",
+                archive_format="JPEG",
+                source="original",
+                size=500,
+                kind=CandidateKind.COVER,
+                playable=False,
+                score=100,
+            )
+        )
+    return ArchiveItem(
+        identifier=identifier,
+        source_url=f"https://archive.org/details/{identifier}",
+        media_type=MediaType.AUDIOBOOK,
+        raw_title=f"Raw {identifier}",
+        title=f"Title {identifier}",
+        creator=creator,
+        year=year,
+        candidates=candidates,
+    )
+
+
+def test_resolve_batch_plans_keeps_item_failures_isolated(tmp_path: Path) -> None:
+    queue = _write_queue(
+        tmp_path / "audiobook-links.txt",
+        "https://archive.org/details/good\n"
+        "https://archive.org/details/blocked\n"
+        "https://archive.org/details/failed\n",
+    )
+    preview = parse_fetch_queue(MediaType.AUDIOBOOK, queue)
+    provider = _FakeProvider(
+        {
+            "https://archive.org/details/good": _archive_item("good"),
+            "https://archive.org/details/blocked": _archive_item("blocked", year=None),
+            "https://archive.org/details/failed": ProviderError("metadata unavailable"),
+        }
+    )
+
+    result = resolve_batch_plans(preview, tmp_path / "library", provider)
+
+    assert [item.status for item in result.items] == [
+        "blocked",
+        "blocked",
+        "failed",
+    ]
+    assert result.actionable_count == 0
+    assert result.blocked_count == 2
+    assert result.failed_count == 1
+    assert result.items[1].warning_count == 1
+    assert "year was not identified" in result.items[1].warnings[0]
+    assert result.items[2].error == "metadata unavailable"
+
+
+def test_resolve_batch_plans_reports_selected_edition_and_destination(
+    tmp_path: Path,
+) -> None:
+    queue = _write_queue(
+        tmp_path / "audiobook-links.txt",
+        "https://archive.org/details/good\n",
+    )
+    preview = parse_fetch_queue(MediaType.AUDIOBOOK, queue)
+    provider = _FakeProvider(
+        {"https://archive.org/details/good": _archive_item("good")}
+    )
+
+    result = resolve_batch_plans(
+        preview,
+        tmp_path / "library",
+        provider,
+        verified_year_overrides={"good": 1926},
+    )
+
+    item = result.items[0]
+    assert item.status == "actionable"
+    assert item.title == "Title good"
+    assert item.creator == "Example Author"
+    assert item.year == 1926
+    assert item.year_provenance == "verified-override"
+    assert item.audio_file_count == 1
+    assert item.selected_edition is not None
+    assert item.destination is not None
+    assert "Example Author" in str(item.destination)
+    assert "Title good" in str(item.destination)
+
+
+def test_resolve_batch_plans_does_not_modify_queue(tmp_path: Path) -> None:
+    queue = _write_queue(
+        tmp_path / "audiobook-links.txt",
+        "https://archive.org/details/good\n",
+    )
+    before = queue.read_bytes()
+    preview = parse_fetch_queue(MediaType.AUDIOBOOK, queue)
+    provider = _FakeProvider(
+        {"https://archive.org/details/good": _archive_item("good")}
+    )
+
+    resolve_batch_plans(preview, tmp_path / "library", provider)
+
+    assert queue.read_bytes() == before
+
+
+
+def test_provider_year_does_not_make_audiobook_batch_plan_actionable(
+    tmp_path: Path,
+) -> None:
+    queue = _write_queue(
+        tmp_path / "audiobook-links.txt",
+        "https://archive.org/details/recording-year-not-publication-year\n",
+    )
+    preview = parse_fetch_queue(MediaType.AUDIOBOOK, queue)
+    provider = _FakeProvider(
+        {
+            "https://archive.org/details/recording-year-not-publication-year":
+                _archive_item(
+                    "recording-year-not-publication-year",
+                    year=2008,
+                )
+        }
+    )
+
+    result = resolve_batch_plans(
+        preview,
+        tmp_path / "library",
+        provider,
+    )
+
+    item = result.items[0]
+    assert item.status == "blocked"
+    assert item.year == 2008
+    assert item.year_provenance == "provider"
+    assert any(
+        "provider-derived" in warning and "verified" in warning
+        for warning in item.warnings
+    )
+
+
+def test_verified_year_override_clears_batch_year_provenance_gate(
+    tmp_path: Path,
+) -> None:
+    queue = _write_queue(
+        tmp_path / "audiobook-links.txt",
+        "https://archive.org/details/edison\n",
+    )
+    preview = parse_fetch_queue(MediaType.AUDIOBOOK, queue)
+    provider = _FakeProvider(
+        {
+            "https://archive.org/details/edison":
+                _archive_item("edison", year=2008)
+        }
+    )
+
+    result = resolve_batch_plans(
+        preview,
+        tmp_path / "library",
+        provider,
+        verified_year_overrides={"edison": 1898},
+    )
+
+    item = result.items[0]
+    assert item.status == "actionable"
+    assert item.year == 1898
+    assert item.year_provenance == "verified-override"
+    assert not any("provider-derived" in warning for warning in item.warnings)
