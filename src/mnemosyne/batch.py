@@ -5,6 +5,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from .batch_state import (
+    BatchStateError,
+    discover_existing_staged_job,
+    load_batch_state,
+    record_batch_item,
+    staged_job_is_valid,
+)
 from .config import runtime_root
 from .fetcher import FetchError, FetchResult, fetch_plan_to_staging
 from .models import AcquisitionPlan, MediaType
@@ -142,10 +149,15 @@ class BatchFetchItem:
 class BatchFetchSummary:
     execution_preview: BatchExecutionPreview
     items: tuple[BatchFetchItem, ...]
+    state_path: Path
 
     @property
     def staged_count(self) -> int:
         return sum(item.status == "staged" for item in self.items)
+
+    @property
+    def already_staged_count(self) -> int:
+        return sum(item.status == "already-staged" for item in self.items)
 
     @property
     def failed_count(self) -> int:
@@ -158,6 +170,10 @@ class BatchFetchSummary:
     @property
     def skipped_failed_count(self) -> int:
         return sum(item.status == "skipped-failed" for item in self.items)
+
+    @property
+    def retry_required_count(self) -> int:
+        return sum(item.status == "retry-required" for item in self.items)
 
 
 def fetch_queue_path(
@@ -520,6 +536,7 @@ def execute_batch_fetches(
     execution_preview: BatchExecutionPreview,
     staging_root: Path,
     *,
+    retry_failed: bool = False,
     fetcher=fetch_plan_to_staging,
 ) -> BatchFetchSummary:
     results: list[BatchFetchItem] = []
@@ -528,10 +545,33 @@ def execute_batch_fetches(
         for item in execution_preview.plan_preview.items
     }
 
+    queue = execution_preview.plan_preview.queue
+    state_root = staging_root.parent / "state"
+    state_path, state = load_batch_state(
+        state_root,
+        queue.media_type,
+        queue.queue_path,
+    )
+    state_items = state.get("items") or {}
+
     for execution_item in execution_preview.items:
         plan_item = plans_by_line[execution_item.line_number]
+        prior = state_items.get(execution_item.identifier) or {}
+        attempts = int(prior.get("attempts") or 0)
 
         if execution_item.action == "skip-blocked":
+            record_batch_item(
+                state_path,
+                state,
+                identifier=execution_item.identifier,
+                line_number=execution_item.line_number,
+                canonical_url=plan_item.canonical_url,
+                status="blocked",
+                job_id=None,
+                staging_dir=None,
+                attempts=attempts,
+                error=None,
+            )
             results.append(
                 BatchFetchItem(
                     line_number=execution_item.line_number,
@@ -546,6 +586,18 @@ def execute_batch_fetches(
             continue
 
         if execution_item.action == "skip-failed":
+            record_batch_item(
+                state_path,
+                state,
+                identifier=execution_item.identifier,
+                line_number=execution_item.line_number,
+                canonical_url=plan_item.canonical_url,
+                status="plan-failed",
+                job_id=None,
+                staging_dir=None,
+                attempts=attempts,
+                error=plan_item.error,
+            )
             results.append(
                 BatchFetchItem(
                     line_number=execution_item.line_number,
@@ -559,7 +611,79 @@ def execute_batch_fetches(
             )
             continue
 
+        if prior.get("status") in {"staged", "already-staged"} and staged_job_is_valid(prior):
+            results.append(
+                BatchFetchItem(
+                    line_number=execution_item.line_number,
+                    identifier=execution_item.identifier,
+                    status="already-staged",
+                    job_id=str(prior.get("jobId") or ""),
+                    staging_dir=Path(str(prior["stagingDir"])),
+                    warning_count=0,
+                    error=None,
+                )
+            )
+            continue
+
+        discovered = discover_existing_staged_job(
+            staging_root,
+            execution_item.identifier,
+        )
+        if discovered is not None:
+            job_id, staging_dir, warning_count = discovered
+            record_batch_item(
+                state_path,
+                state,
+                identifier=execution_item.identifier,
+                line_number=execution_item.line_number,
+                canonical_url=plan_item.canonical_url,
+                status="already-staged",
+                job_id=job_id,
+                staging_dir=staging_dir,
+                attempts=attempts,
+                error=None,
+            )
+            results.append(
+                BatchFetchItem(
+                    line_number=execution_item.line_number,
+                    identifier=execution_item.identifier,
+                    status="already-staged",
+                    job_id=job_id,
+                    staging_dir=staging_dir,
+                    warning_count=warning_count,
+                    error=None,
+                )
+            )
+            continue
+
+        if prior.get("status") == "failed" and not retry_failed:
+            results.append(
+                BatchFetchItem(
+                    line_number=execution_item.line_number,
+                    identifier=execution_item.identifier,
+                    status="retry-required",
+                    job_id=None,
+                    staging_dir=None,
+                    warning_count=0,
+                    error=str(prior.get("error") or "Previous fetch attempt failed."),
+                )
+            )
+            continue
+
         if plan_item.plan is None:
+            error = "Resolved actionable item has no retained acquisition plan."
+            record_batch_item(
+                state_path,
+                state,
+                identifier=execution_item.identifier,
+                line_number=execution_item.line_number,
+                canonical_url=plan_item.canonical_url,
+                status="failed",
+                job_id=None,
+                staging_dir=None,
+                attempts=attempts,
+                error=error,
+            )
             results.append(
                 BatchFetchItem(
                     line_number=execution_item.line_number,
@@ -568,14 +692,27 @@ def execute_batch_fetches(
                     job_id=None,
                     staging_dir=None,
                     warning_count=0,
-                    error="Resolved actionable item has no retained acquisition plan.",
+                    error=error,
                 )
             )
             continue
 
+        attempts += 1
         try:
             fetched: FetchResult = fetcher(plan_item.plan, staging_root)
-        except (FetchError, OSError, ValueError) as exc:
+        except (FetchError, BatchStateError, OSError, ValueError) as exc:
+            record_batch_item(
+                state_path,
+                state,
+                identifier=execution_item.identifier,
+                line_number=execution_item.line_number,
+                canonical_url=plan_item.canonical_url,
+                status="failed",
+                job_id=None,
+                staging_dir=None,
+                attempts=attempts,
+                error=str(exc),
+            )
             results.append(
                 BatchFetchItem(
                     line_number=execution_item.line_number,
@@ -589,6 +726,18 @@ def execute_batch_fetches(
             )
             continue
 
+        record_batch_item(
+            state_path,
+            state,
+            identifier=execution_item.identifier,
+            line_number=execution_item.line_number,
+            canonical_url=plan_item.canonical_url,
+            status="staged",
+            job_id=fetched.job_id,
+            staging_dir=fetched.staging_dir,
+            attempts=attempts,
+            error=None,
+        )
         results.append(
             BatchFetchItem(
                 line_number=execution_item.line_number,
@@ -604,4 +753,5 @@ def execute_batch_fetches(
     return BatchFetchSummary(
         execution_preview=execution_preview,
         items=tuple(results),
+        state_path=state_path,
     )

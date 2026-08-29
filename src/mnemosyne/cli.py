@@ -179,7 +179,23 @@ def batch_command(
             ),
         ),
     ] = False,
+    retry_failed: Annotated[
+        bool,
+        typer.Option(
+            "--retry-failed",
+            help=(
+                "With --apply, retry items recorded as failed in durable batch state. "
+                "Previously staged items are never downloaded again."
+            ),
+        ),
+    ] = False,
 ) -> None:
+    if retry_failed and not apply:
+        console.print(
+            "[bold red]Batch option error:[/bold red] --retry-failed requires --apply."
+        )
+        raise typer.Exit(code=20)
+
     try:
         preview = parse_fetch_queue(media_type, queue)
     except BatchQueueError as exc:
@@ -212,10 +228,15 @@ def batch_command(
         fetch_summary = execute_batch_fetches(
             execution_preview,
             runtime_root() / "staging",
+            retry_failed=retry_failed,
         )
         render_batch_fetch_summary(fetch_summary)
 
-        if fetch_summary.failed_count or fetch_summary.skipped_failed_count:
+        if (
+            fetch_summary.failed_count
+            or fetch_summary.skipped_failed_count
+            or fetch_summary.retry_required_count
+        ):
             raise typer.Exit(code=22)
         return
 

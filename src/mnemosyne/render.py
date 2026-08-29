@@ -277,10 +277,13 @@ def render_batch_fetch_summary(summary: BatchFetchSummary) -> None:
     counts = Table(show_header=False, box=None, pad_edge=False)
     counts.add_column(style="bold")
     counts.add_column()
-    counts.add_row("Staged", str(summary.staged_count))
+    counts.add_row("Staged now", str(summary.staged_count))
+    counts.add_row("Already staged", str(summary.already_staged_count))
     counts.add_row("Fetch failed", str(summary.failed_count))
+    counts.add_row("Retry required", str(summary.retry_required_count))
     counts.add_row("Blocked", str(summary.blocked_count))
     counts.add_row("Plan failed", str(summary.skipped_failed_count))
+    counts.add_row("State", str(summary.state_path))
     console.print(counts)
 
     table = Table(title="Batch fetch results")
@@ -294,8 +297,12 @@ def render_batch_fetch_summary(summary: BatchFetchSummary) -> None:
     for item in summary.items:
         if item.status == "staged":
             status = "[green]STAGED[/green]"
+        elif item.status == "already-staged":
+            status = "[cyan]ALREADY STAGED[/cyan]"
         elif item.status == "blocked":
             status = "[yellow]BLOCKED[/yellow]"
+        elif item.status == "retry-required":
+            status = "[yellow]RETRY REQUIRED[/yellow]"
         elif item.status == "skipped-failed":
             status = "[red]PLAN FAILED[/red]"
         else:
@@ -328,6 +335,9 @@ def render_batch_fetch_summary(summary: BatchFetchSummary) -> None:
             "Metadata/tagging applied: NO\n"
             "Library modified: NO\n"
             "Queue file modified: NO\n"
+            f"Durable batch state: {summary.state_path}\n"
+            "Previously staged items re-downloaded: NO\n"
+            "Failed items retried automatically: NO\n"
             "Queue auto-pruned: NO",
             border_style="yellow",
         )
