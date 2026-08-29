@@ -8,6 +8,7 @@ import typer
 from .adoption import AdoptionError, adopt_latest_recommended_source
 from .batch import (
     BatchQueueError,
+    build_batch_execution_preview,
     parse_fetch_queue,
     resolve_batch_plans,
 )
@@ -51,6 +52,7 @@ from .readiness import ReadinessError, verify_staged_readiness
 from .render import (
     console,
     render_adoption,
+    render_batch_execution_preview,
     render_batch_plan_preview,
     render_batch_preview,
     render_comparison,
@@ -155,6 +157,16 @@ def batch_command(
             ),
         ),
     ] = False,
+    execution_plan: Annotated[
+        bool,
+        typer.Option(
+            "--execution-plan",
+            help=(
+                "Resolve plans and show the exact sequential batch actions that "
+                "would run. Dry-run only; starts no downloads."
+            ),
+        ),
+    ] = False,
 ) -> None:
     try:
         preview = parse_fetch_queue(media_type, queue)
@@ -164,7 +176,7 @@ def batch_command(
 
     render_batch_preview(preview)
 
-    if not resolve_plans:
+    if not resolve_plans and not execution_plan:
         return
 
     if not preview.items:
@@ -179,6 +191,10 @@ def batch_command(
         provider,
     )
     render_batch_plan_preview(plan_preview)
+
+    if execution_plan:
+        execution_preview = build_batch_execution_preview(plan_preview)
+        render_batch_execution_preview(execution_preview)
 
     if plan_preview.failed_count:
         raise typer.Exit(code=21)

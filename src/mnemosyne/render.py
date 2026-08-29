@@ -6,7 +6,7 @@ from rich.table import Table
 from rich.text import Text
 
 from .adoption import AdoptionResult
-from .batch import BatchPlanPreview, BatchPreview
+from .batch import BatchExecutionPreview, BatchPlanPreview, BatchPreview
 from .comparison import ComparisonResult
 from .completion import CompletionPreview, CompletionResult
 from .cleanup import CleanupPreview, CleanupResult
@@ -191,6 +191,75 @@ def render_batch_plan_preview(preview: BatchPlanPreview) -> None:
             border_style="yellow",
         )
     )
+
+def render_batch_execution_preview(preview: BatchExecutionPreview) -> None:
+    console.print(
+        Panel.fit(
+            "[bold]Mnemosyne[/bold]\n[dim]Batch execution dry-run[/dim]",
+            border_style="cyan",
+        )
+    )
+
+    summary = Table(show_header=False, box=None, pad_edge=False)
+    summary.add_column(style="bold")
+    summary.add_column()
+    summary.add_row("Would execute", str(preview.execute_count))
+    summary.add_row("Skip blocked", str(preview.blocked_count))
+    summary.add_row("Skip failed", str(preview.failed_count))
+    summary.add_row("Execution mode", "Sequential")
+    summary.add_row("Failure policy", "Continue to next item")
+    console.print(summary)
+
+    table = Table(title="Execution sequence")
+    table.add_column("Seq", justify="right")
+    table.add_column("Line", justify="right")
+    table.add_column("Action")
+    table.add_column("Identifier")
+    table.add_column("Title")
+    table.add_column("Destination")
+
+    for item in preview.items:
+        if item.action == "execute":
+            action = "[green]WOULD EXECUTE[/green]"
+            sequence = str(item.sequence)
+        elif item.action == "skip-blocked":
+            action = "[yellow]SKIP BLOCKED[/yellow]"
+            sequence = "—"
+        else:
+            action = "[red]SKIP FAILED[/red]"
+            sequence = "—"
+
+        table.add_row(
+            sequence,
+            str(item.line_number),
+            action,
+            item.identifier,
+            item.title or "?",
+            str(item.destination) if item.destination is not None else "—",
+        )
+
+    console.print(table)
+
+    for item in preview.items:
+        if item.reason:
+            console.print(
+                f"[dim]Line {item.line_number} {item.identifier}: "
+                f"{item.reason}[/dim]"
+            )
+
+    console.print(
+        Panel(
+            "Dry-run only. Execution has NOT started.\n"
+            "Processing order: sequential\n"
+            "Failure policy: continue to next item\n"
+            "Media downloads started: NO\n"
+            "Staging modified: NO\n"
+            "Queue file modified: NO\n"
+            "Library modified: NO",
+            border_style="yellow",
+        )
+    )
+
 
 def render_plan(plan: AcquisitionPlan) -> None:
     item = plan.item

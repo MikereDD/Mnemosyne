@@ -96,6 +96,35 @@ class BatchPlanPreview:
         return sum(item.status == "failed" for item in self.items)
 
 
+@dataclass(frozen=True)
+class BatchExecutionItem:
+    sequence: int
+    line_number: int
+    identifier: str
+    action: str
+    title: str | None
+    destination: Path | None
+    reason: str | None
+
+
+@dataclass(frozen=True)
+class BatchExecutionPreview:
+    plan_preview: BatchPlanPreview
+    items: tuple[BatchExecutionItem, ...]
+
+    @property
+    def execute_count(self) -> int:
+        return sum(item.action == "execute" for item in self.items)
+
+    @property
+    def blocked_count(self) -> int:
+        return sum(item.action == "skip-blocked" for item in self.items)
+
+    @property
+    def failed_count(self) -> int:
+        return sum(item.action == "skip-failed" for item in self.items)
+
+
 def fetch_queue_path(
     media_type: MediaType,
     *,
@@ -405,3 +434,44 @@ def resolve_batch_plans(
         )
 
     return BatchPlanPreview(queue=preview, items=tuple(resolved))
+
+
+
+def build_batch_execution_preview(
+    plan_preview: BatchPlanPreview,
+) -> BatchExecutionPreview:
+    items: list[BatchExecutionItem] = []
+    sequence = 0
+
+    for plan_item in plan_preview.items:
+        if plan_item.status == "actionable":
+            sequence += 1
+            action = "execute"
+            reason = None
+        elif plan_item.status == "blocked":
+            action = "skip-blocked"
+            reason = (
+                plan_item.warnings[0]
+                if plan_item.warnings
+                else "Plan is blocked."
+            )
+        else:
+            action = "skip-failed"
+            reason = plan_item.error or "Plan resolution failed."
+
+        items.append(
+            BatchExecutionItem(
+                sequence=sequence if action == "execute" else 0,
+                line_number=plan_item.line_number,
+                identifier=plan_item.identifier,
+                action=action,
+                title=plan_item.title,
+                destination=plan_item.destination,
+                reason=reason,
+            )
+        )
+
+    return BatchExecutionPreview(
+        plan_preview=plan_preview,
+        items=tuple(items),
+    )

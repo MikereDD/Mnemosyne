@@ -6,6 +6,7 @@ import pytest
 
 from mnemosyne.batch import (
     BatchQueueError,
+    build_batch_execution_preview,
     fetch_queue_path,
     parse_fetch_queue,
     resolve_batch_plans,
@@ -429,3 +430,90 @@ def test_conflicting_verified_year_sources_fail_closed(tmp_path: Path) -> None:
     assert "queue=1898" in item.error
     assert "override=2008" in item.error
     assert provider.calls == []
+
+
+
+def test_execution_preview_preserves_actionable_order_and_skips_others(
+    tmp_path: Path,
+) -> None:
+    queue = _write_queue(
+        tmp_path / "audiobook-links.txt",
+        "https://archive.org/details/first | year=1901\n"
+        "https://archive.org/details/blocked\n"
+        "https://archive.org/details/third | year=1903\n"
+        "https://archive.org/details/failed\n",
+    )
+    preview = parse_fetch_queue(MediaType.AUDIOBOOK, queue)
+    provider = _FakeProvider(
+        {
+            "https://archive.org/details/first": _archive_item("first", year=2001),
+            "https://archive.org/details/blocked": _archive_item("blocked", year=None),
+            "https://archive.org/details/third": _archive_item("third", year=2003),
+            "https://archive.org/details/failed": ProviderError("metadata unavailable"),
+        }
+    )
+
+    plans = resolve_batch_plans(preview, tmp_path / "library", provider)
+    execution = build_batch_execution_preview(plans)
+
+    assert [item.action for item in execution.items] == [
+        "execute",
+        "skip-blocked",
+        "execute",
+        "skip-failed",
+    ]
+    assert [item.sequence for item in execution.items] == [1, 0, 2, 0]
+    assert execution.execute_count == 2
+    assert execution.blocked_count == 1
+    assert execution.failed_count == 1
+    assert [item.identifier for item in execution.items if item.action == "execute"] == [
+        "first",
+        "third",
+    ]
+
+
+def test_execution_preview_carries_destination_for_actionable_items(
+    tmp_path: Path,
+) -> None:
+    queue = _write_queue(
+        tmp_path / "audiobook-links.txt",
+        "https://archive.org/details/edison | year=1898\n",
+    )
+    preview = parse_fetch_queue(MediaType.AUDIOBOOK, queue)
+    provider = _FakeProvider(
+        {
+            "https://archive.org/details/edison":
+                _archive_item("edison", year=2008)
+        }
+    )
+
+    plans = resolve_batch_plans(preview, tmp_path / "library", provider)
+    execution = build_batch_execution_preview(plans)
+
+    item = execution.items[0]
+    assert item.action == "execute"
+    assert item.sequence == 1
+    assert item.destination is not None
+    assert "1898" in str(item.destination)
+
+
+def test_execution_preview_is_read_only(tmp_path: Path) -> None:
+    queue = _write_queue(
+        tmp_path / "audiobook-links.txt",
+        "https://archive.org/details/edison | year=1898\n",
+    )
+    before = queue.read_bytes()
+    library = tmp_path / "library"
+    provider = _FakeProvider(
+        {
+            "https://archive.org/details/edison":
+                _archive_item("edison", year=2008)
+        }
+    )
+
+    preview = parse_fetch_queue(MediaType.AUDIOBOOK, queue)
+    plans = resolve_batch_plans(preview, library, provider)
+    build_batch_execution_preview(plans)
+
+    assert queue.read_bytes() == before
+    assert not library.exists()
