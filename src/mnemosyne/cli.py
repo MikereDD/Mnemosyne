@@ -9,6 +9,7 @@ from .adoption import AdoptionError, adopt_latest_recommended_source
 from .batch import (
     BatchQueueError,
     build_batch_execution_preview,
+    execute_batch_fetches,
     parse_fetch_queue,
     resolve_batch_plans,
 )
@@ -53,6 +54,7 @@ from .render import (
     console,
     render_adoption,
     render_batch_execution_preview,
+    render_batch_fetch_summary,
     render_batch_plan_preview,
     render_batch_preview,
     render_comparison,
@@ -167,6 +169,16 @@ def batch_command(
             ),
         ),
     ] = False,
+    apply: Annotated[
+        bool,
+        typer.Option(
+            "--apply",
+            help=(
+                "Sequentially fetch ACTIONABLE items into isolated staging jobs. "
+                "Does not tag, place, complete, or prune the queue."
+            ),
+        ),
+    ] = False,
 ) -> None:
     try:
         preview = parse_fetch_queue(media_type, queue)
@@ -176,7 +188,7 @@ def batch_command(
 
     render_batch_preview(preview)
 
-    if not resolve_plans and not execution_plan:
+    if not resolve_plans and not execution_plan and not apply:
         return
 
     if not preview.items:
@@ -192,9 +204,20 @@ def batch_command(
     )
     render_batch_plan_preview(plan_preview)
 
-    if execution_plan:
+    if execution_plan or apply:
         execution_preview = build_batch_execution_preview(plan_preview)
         render_batch_execution_preview(execution_preview)
+
+    if apply:
+        fetch_summary = execute_batch_fetches(
+            execution_preview,
+            runtime_root() / "staging",
+        )
+        render_batch_fetch_summary(fetch_summary)
+
+        if fetch_summary.failed_count or fetch_summary.skipped_failed_count:
+            raise typer.Exit(code=22)
+        return
 
     if plan_preview.failed_count:
         raise typer.Exit(code=21)

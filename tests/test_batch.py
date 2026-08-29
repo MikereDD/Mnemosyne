@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from mnemosyne.batch import (
     BatchQueueError,
     build_batch_execution_preview,
+    execute_batch_fetches,
     fetch_queue_path,
     parse_fetch_queue,
     resolve_batch_plans,
@@ -514,6 +516,170 @@ def test_execution_preview_is_read_only(tmp_path: Path) -> None:
     preview = parse_fetch_queue(MediaType.AUDIOBOOK, queue)
     plans = resolve_batch_plans(preview, library, provider)
     build_batch_execution_preview(plans)
+
+    assert queue.read_bytes() == before
+    assert not library.exists()
+
+
+
+def test_batch_fetch_executes_only_actionable_items_in_order(
+    tmp_path: Path,
+) -> None:
+    queue = _write_queue(
+        tmp_path / "audiobook-links.txt",
+        "https://archive.org/details/first | year=1901\n"
+        "https://archive.org/details/blocked\n"
+        "https://archive.org/details/third | year=1903\n",
+    )
+    preview = parse_fetch_queue(MediaType.AUDIOBOOK, queue)
+    provider = _FakeProvider(
+        {
+            "https://archive.org/details/first": _archive_item("first", year=2001),
+            "https://archive.org/details/blocked": _archive_item("blocked", year=None),
+            "https://archive.org/details/third": _archive_item("third", year=2003),
+        }
+    )
+    plans = resolve_batch_plans(preview, tmp_path / "library", provider)
+    execution = build_batch_execution_preview(plans)
+    calls: list[str] = []
+
+    def fake_fetcher(plan, staging_root):
+        calls.append(plan.item.identifier)
+        return SimpleNamespace(
+            job_id=f"{plan.item.identifier}-job",
+            staging_dir=staging_root / f"{plan.item.identifier}-job",
+            warnings=(),
+        )
+
+    summary = execute_batch_fetches(
+        execution,
+        tmp_path / "staging",
+        fetcher=fake_fetcher,
+    )
+
+    assert calls == ["first", "third"]
+    assert [item.status for item in summary.items] == [
+        "staged",
+        "blocked",
+        "staged",
+    ]
+    assert summary.staged_count == 2
+    assert summary.blocked_count == 1
+    assert summary.failed_count == 0
+
+
+def test_batch_fetch_failure_is_isolated_and_processing_continues(
+    tmp_path: Path,
+) -> None:
+    queue = _write_queue(
+        tmp_path / "audiobook-links.txt",
+        "https://archive.org/details/first | year=1901\n"
+        "https://archive.org/details/second | year=1902\n",
+    )
+    preview = parse_fetch_queue(MediaType.AUDIOBOOK, queue)
+    provider = _FakeProvider(
+        {
+            "https://archive.org/details/first": _archive_item("first"),
+            "https://archive.org/details/second": _archive_item("second"),
+        }
+    )
+    plans = resolve_batch_plans(preview, tmp_path / "library", provider)
+    execution = build_batch_execution_preview(plans)
+    calls: list[str] = []
+
+    def fake_fetcher(plan, staging_root):
+        calls.append(plan.item.identifier)
+        if plan.item.identifier == "first":
+            raise OSError("simulated staging failure")
+        return SimpleNamespace(
+            job_id="second-job",
+            staging_dir=staging_root / "second-job",
+            warnings=(),
+        )
+
+    summary = execute_batch_fetches(
+        execution,
+        tmp_path / "staging",
+        fetcher=fake_fetcher,
+    )
+
+    assert calls == ["first", "second"]
+    assert [item.status for item in summary.items] == ["failed", "staged"]
+    assert summary.failed_count == 1
+    assert summary.staged_count == 1
+    assert "simulated staging failure" in (summary.items[0].error or "")
+
+
+def test_batch_fetch_skips_plan_failures_without_calling_fetcher(
+    tmp_path: Path,
+) -> None:
+    queue = _write_queue(
+        tmp_path / "audiobook-links.txt",
+        "https://archive.org/details/good | year=1901\n"
+        "https://archive.org/details/bad\n",
+    )
+    preview = parse_fetch_queue(MediaType.AUDIOBOOK, queue)
+    provider = _FakeProvider(
+        {
+            "https://archive.org/details/good": _archive_item("good"),
+            "https://archive.org/details/bad": ProviderError("metadata unavailable"),
+        }
+    )
+    plans = resolve_batch_plans(preview, tmp_path / "library", provider)
+    execution = build_batch_execution_preview(plans)
+    calls: list[str] = []
+
+    def fake_fetcher(plan, staging_root):
+        calls.append(plan.item.identifier)
+        return SimpleNamespace(
+            job_id="good-job",
+            staging_dir=staging_root / "good-job",
+            warnings=(),
+        )
+
+    summary = execute_batch_fetches(
+        execution,
+        tmp_path / "staging",
+        fetcher=fake_fetcher,
+    )
+
+    assert calls == ["good"]
+    assert [item.status for item in summary.items] == [
+        "staged",
+        "skipped-failed",
+    ]
+    assert summary.skipped_failed_count == 1
+    assert summary.items[1].error == "metadata unavailable"
+
+
+def test_batch_fetch_does_not_modify_queue_or_library_with_fake_fetcher(
+    tmp_path: Path,
+) -> None:
+    queue = _write_queue(
+        tmp_path / "audiobook-links.txt",
+        "https://archive.org/details/edison | year=1898\n",
+    )
+    before = queue.read_bytes()
+    library = tmp_path / "library"
+    staging = tmp_path / "staging"
+    preview = parse_fetch_queue(MediaType.AUDIOBOOK, queue)
+    provider = _FakeProvider(
+        {
+            "https://archive.org/details/edison":
+                _archive_item("edison", year=2008)
+        }
+    )
+    plans = resolve_batch_plans(preview, library, provider)
+    execution = build_batch_execution_preview(plans)
+
+    def fake_fetcher(plan, staging_root):
+        return SimpleNamespace(
+            job_id="edison-job",
+            staging_dir=staging_root / "edison-job",
+            warnings=(),
+        )
+
+    execute_batch_fetches(execution, staging, fetcher=fake_fetcher)
 
     assert queue.read_bytes() == before
     assert not library.exists()

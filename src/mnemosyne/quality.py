@@ -13,6 +13,7 @@ class ActualAudioQuality:
     bitrate_bps: int | None
     sample_rate_hz: int | None
     channels: int | None
+    inspection_warning: str | None = None
 
 
 def _codec_from_parser(audio: object, path: Path) -> tuple[str | None, bool | None]:
@@ -38,7 +39,22 @@ def _codec_from_parser(audio: object, path: Path) -> tuple[str | None, bool | No
 
 
 def inspect_actual_quality(path: Path) -> ActualAudioQuality:
-    audio = MutagenFile(path)
+    try:
+        audio = MutagenFile(path)
+    except Exception as exc:
+        return ActualAudioQuality(
+            codec=None,
+            lossless=None,
+            bitrate_bps=None,
+            sample_rate_hz=None,
+            channels=None,
+            inspection_warning=(
+                "Actual audio quality inspection failed; the downloaded file "
+                "passed container/signature validation but could not be parsed "
+                f"for codec details: {exc}"
+            ),
+        )
+
     if audio is None or getattr(audio, "info", None) is None:
         return ActualAudioQuality(
             codec=None,

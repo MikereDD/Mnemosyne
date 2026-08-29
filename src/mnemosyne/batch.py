@@ -6,6 +6,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from .config import runtime_root
+from .fetcher import FetchError, FetchResult, fetch_plan_to_staging
 from .models import AcquisitionPlan, MediaType
 from .planner import build_plan
 from .providers.base import ProviderError
@@ -76,6 +77,7 @@ class BatchPlanItem:
     warning_count: int
     warnings: tuple[str, ...]
     error: str | None
+    plan: AcquisitionPlan | None
 
 
 @dataclass(frozen=True)
@@ -123,6 +125,39 @@ class BatchExecutionPreview:
     @property
     def failed_count(self) -> int:
         return sum(item.action == "skip-failed" for item in self.items)
+
+
+@dataclass(frozen=True)
+class BatchFetchItem:
+    line_number: int
+    identifier: str
+    status: str
+    job_id: str | None
+    staging_dir: Path | None
+    warning_count: int
+    error: str | None
+
+
+@dataclass(frozen=True)
+class BatchFetchSummary:
+    execution_preview: BatchExecutionPreview
+    items: tuple[BatchFetchItem, ...]
+
+    @property
+    def staged_count(self) -> int:
+        return sum(item.status == "staged" for item in self.items)
+
+    @property
+    def failed_count(self) -> int:
+        return sum(item.status == "failed" for item in self.items)
+
+    @property
+    def blocked_count(self) -> int:
+        return sum(item.status == "blocked" for item in self.items)
+
+    @property
+    def skipped_failed_count(self) -> int:
+        return sum(item.status == "skipped-failed" for item in self.items)
 
 
 def fetch_queue_path(
@@ -353,6 +388,7 @@ def resolve_batch_plans(
                         f"queue={item.verified_year}, "
                         f"override={external_verified_year}."
                     ),
+                    plan=None,
                 )
             )
             continue
@@ -387,6 +423,7 @@ def resolve_batch_plans(
                     warning_count=0,
                     warnings=(),
                     error=str(exc),
+                    plan=None,
                 )
             )
             continue
@@ -430,6 +467,7 @@ def resolve_batch_plans(
                 warning_count=len(warnings),
                 warnings=warnings,
                 error=None,
+                plan=plan,
             )
         )
 
@@ -474,4 +512,96 @@ def build_batch_execution_preview(
     return BatchExecutionPreview(
         plan_preview=plan_preview,
         items=tuple(items),
+    )
+
+
+
+def execute_batch_fetches(
+    execution_preview: BatchExecutionPreview,
+    staging_root: Path,
+    *,
+    fetcher=fetch_plan_to_staging,
+) -> BatchFetchSummary:
+    results: list[BatchFetchItem] = []
+    plans_by_line = {
+        item.line_number: item
+        for item in execution_preview.plan_preview.items
+    }
+
+    for execution_item in execution_preview.items:
+        plan_item = plans_by_line[execution_item.line_number]
+
+        if execution_item.action == "skip-blocked":
+            results.append(
+                BatchFetchItem(
+                    line_number=execution_item.line_number,
+                    identifier=execution_item.identifier,
+                    status="blocked",
+                    job_id=None,
+                    staging_dir=None,
+                    warning_count=plan_item.warning_count,
+                    error=None,
+                )
+            )
+            continue
+
+        if execution_item.action == "skip-failed":
+            results.append(
+                BatchFetchItem(
+                    line_number=execution_item.line_number,
+                    identifier=execution_item.identifier,
+                    status="skipped-failed",
+                    job_id=None,
+                    staging_dir=None,
+                    warning_count=0,
+                    error=plan_item.error,
+                )
+            )
+            continue
+
+        if plan_item.plan is None:
+            results.append(
+                BatchFetchItem(
+                    line_number=execution_item.line_number,
+                    identifier=execution_item.identifier,
+                    status="failed",
+                    job_id=None,
+                    staging_dir=None,
+                    warning_count=0,
+                    error="Resolved actionable item has no retained acquisition plan.",
+                )
+            )
+            continue
+
+        try:
+            fetched: FetchResult = fetcher(plan_item.plan, staging_root)
+        except (FetchError, OSError, ValueError) as exc:
+            results.append(
+                BatchFetchItem(
+                    line_number=execution_item.line_number,
+                    identifier=execution_item.identifier,
+                    status="failed",
+                    job_id=None,
+                    staging_dir=None,
+                    warning_count=0,
+                    error=str(exc),
+                )
+            )
+            continue
+
+        results.append(
+            BatchFetchItem(
+                line_number=execution_item.line_number,
+                identifier=execution_item.identifier,
+                status="staged",
+                job_id=fetched.job_id,
+                staging_dir=fetched.staging_dir,
+                warning_count=len(fetched.warnings),
+                error=None,
+            )
+        )
+
+    return BatchFetchSummary(
+        execution_preview=execution_preview,
+        items=tuple(results),
     )

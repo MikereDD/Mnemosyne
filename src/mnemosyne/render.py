@@ -6,7 +6,12 @@ from rich.table import Table
 from rich.text import Text
 
 from .adoption import AdoptionResult
-from .batch import BatchExecutionPreview, BatchPlanPreview, BatchPreview
+from .batch import (
+    BatchExecutionPreview,
+    BatchFetchSummary,
+    BatchPlanPreview,
+    BatchPreview,
+)
 from .comparison import ComparisonResult
 from .completion import CompletionPreview, CompletionResult
 from .cleanup import CleanupPreview, CleanupResult
@@ -256,6 +261,74 @@ def render_batch_execution_preview(preview: BatchExecutionPreview) -> None:
             "Staging modified: NO\n"
             "Queue file modified: NO\n"
             "Library modified: NO",
+            border_style="yellow",
+        )
+    )
+
+
+def render_batch_fetch_summary(summary: BatchFetchSummary) -> None:
+    console.print(
+        Panel.fit(
+            "[bold]Mnemosyne[/bold]\n[dim]Batch fetch result[/dim]",
+            border_style="cyan",
+        )
+    )
+
+    counts = Table(show_header=False, box=None, pad_edge=False)
+    counts.add_column(style="bold")
+    counts.add_column()
+    counts.add_row("Staged", str(summary.staged_count))
+    counts.add_row("Fetch failed", str(summary.failed_count))
+    counts.add_row("Blocked", str(summary.blocked_count))
+    counts.add_row("Plan failed", str(summary.skipped_failed_count))
+    console.print(counts)
+
+    table = Table(title="Batch fetch results")
+    table.add_column("Line", justify="right")
+    table.add_column("Status")
+    table.add_column("Identifier")
+    table.add_column("Job")
+    table.add_column("Staging")
+    table.add_column("Warnings", justify="right")
+
+    for item in summary.items:
+        if item.status == "staged":
+            status = "[green]STAGED[/green]"
+        elif item.status == "blocked":
+            status = "[yellow]BLOCKED[/yellow]"
+        elif item.status == "skipped-failed":
+            status = "[red]PLAN FAILED[/red]"
+        else:
+            status = "[red]FETCH FAILED[/red]"
+
+        table.add_row(
+            str(item.line_number),
+            status,
+            item.identifier,
+            item.job_id or "—",
+            str(item.staging_dir) if item.staging_dir is not None else "—",
+            str(item.warning_count),
+        )
+
+    console.print(table)
+
+    for item in summary.items:
+        if item.error:
+            console.print(
+                f"[red]Line {item.line_number} {item.identifier}: "
+                f"{item.error}[/red]"
+            )
+
+    console.print(
+        Panel(
+            "Batch fetch finished.\n"
+            "Processing order: sequential\n"
+            "Failure policy: continue to next item\n"
+            "ACTIONABLE items may have modified staging: YES\n"
+            "Metadata/tagging applied: NO\n"
+            "Library modified: NO\n"
+            "Queue file modified: NO\n"
+            "Queue auto-pruned: NO",
             border_style="yellow",
         )
     )
