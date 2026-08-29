@@ -51,6 +51,11 @@ from .providers.base import ProviderError
 from .prune import PruneError, apply_prune, preview_prune
 from .placement import PlacementError, apply_final_placement, preview_final_placement
 from .readiness import ReadinessError, verify_staged_readiness
+from .quality_recovery import (
+    QualityRecoveryError,
+    apply_quality_recovery,
+    preview_quality_recovery,
+)
 from .render import (
     console,
     render_adoption,
@@ -664,6 +669,72 @@ def prune_command(
         raise typer.Exit(code=25) from exc
 
     render_prune_result(result)
+
+
+@app.command("recover-quality")
+def recover_quality_command(
+    job: Annotated[
+        Path,
+        typer.Argument(help="Staging job directory whose failed quality inspection should be retried."),
+    ],
+    apply: Annotated[
+        bool,
+        typer.Option(
+            "--apply",
+            help=(
+                "Update fetch provenance only after staged SHA-256 verification and "
+                "successful quality reinspection. Audio is never modified."
+            ),
+        ),
+    ] = False,
+) -> None:
+    """Recover an inconclusive staged audio-quality inspection without re-downloading."""
+    try:
+        preview = preview_quality_recovery(job)
+    except (QualityRecoveryError, OSError) as exc:
+        console.print(f"[bold red]Quality recovery blocked:[/bold red] {exc}")
+        raise typer.Exit(code=26) from exc
+
+    console.print(f"[bold]Quality recovery target:[/bold] {preview.job_dir}")
+    for item in preview.files:
+        quality = item.quality
+        console.print(
+            f"  • {item.path.name}: codec={quality.codec or 'unknown'}, "
+            f"lossless={quality.lossless}, bitrate={quality.bitrate_bps or 'unknown'}, "
+            f"sample_rate={quality.sample_rate_hz or 'unknown'}, "
+            f"channels={quality.channels or 'unknown'}, "
+            f"source={quality.inspection_source or 'unknown'}"
+        )
+
+    console.print(
+        f"Recoverable warnings: {preview.removable_warning_count}\n"
+        f"Other warnings preserved: {preview.preserved_warning_count}\n"
+        "Audio modified: NO\n"
+        "Library modified: NO"
+    )
+
+    if not apply:
+        console.print(
+            "[yellow]Report not changed.[/yellow] Re-run with [bold]--apply[/bold] "
+            "to record the verified recovery."
+        )
+        return
+
+    try:
+        result = apply_quality_recovery(job)
+    except (QualityRecoveryError, OSError) as exc:
+        console.print(f"[bold red]Quality recovery failed:[/bold red] {exc}")
+        raise typer.Exit(code=27) from exc
+
+    console.print(
+        "[bold green]Quality recovery verified.[/bold green]\n"
+        f"Status: {result.status}\n"
+        f"Warnings removed: {result.removed_warning_count}\n"
+        f"Warnings preserved: {result.preserved_warning_count}\n"
+        f"Report: {result.report_path}\n"
+        "Audio modified: NO\n"
+        "Library modified: NO"
+    )
 
 
 if __name__ == "__main__":
