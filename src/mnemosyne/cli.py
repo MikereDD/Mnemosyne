@@ -5,7 +5,19 @@ from typing import Annotated
 
 import typer
 
-from .adoption import AdoptionError, adopt_latest_recommended_source
+from .adoption import AdoptionError, adopt_latest_recommended_edition
+from .batch import (
+    BatchQueueError,
+    build_batch_execution_preview,
+    execute_batch_fetches,
+    parse_fetch_queue,
+    resolve_batch_plans,
+)
+from .batch_lifecycle import build_batch_lifecycle_preview
+from .batch_source_resolution import (
+    build_batch_source_resolution_preview,
+    execute_batch_source_resolution,
+)
 from .comparison import ComparisonError, compare_archive_candidates
 from .completion import CompletionError, apply_completion, preview_completion
 from .cleanup import CleanupError, apply_cleanup, preview_cleanup
@@ -43,9 +55,21 @@ from .providers.base import ProviderError
 from .prune import PruneError, apply_prune, preview_prune
 from .placement import PlacementError, apply_final_placement, preview_final_placement
 from .readiness import ReadinessError, verify_staged_readiness
+from .quality_recovery import (
+    QualityRecoveryError,
+    apply_quality_recovery,
+    preview_quality_recovery,
+)
 from .render import (
     console,
     render_adoption,
+    render_batch_execution_preview,
+    render_batch_fetch_summary,
+    render_batch_lifecycle_preview,
+    render_batch_source_resolution_preview,
+    render_batch_source_resolution_summary,
+    render_batch_plan_preview,
+    render_batch_preview,
     render_comparison,
     render_fetch_result,
     render_inspection,
@@ -123,6 +147,140 @@ def init() -> None:
     else:
         console.print("[dim]Runtime structure already exists; nothing changed.[/dim]")
 
+
+
+@app.command("batch")
+def batch_command(
+    media_type: Annotated[
+        MediaType,
+        typer.Argument(help="Media type queue: audiobook, ebook, or music."),
+    ],
+    queue: Annotated[
+        Path | None,
+        typer.Option(
+            "--queue",
+            help="Preview a specific fetch-list file instead of the canonical queue.",
+        ),
+    ] = None,
+    resolve_plans: Annotated[
+        bool,
+        typer.Option(
+            "--resolve-plans",
+            help=(
+                "Retrieve provider metadata and resolve each valid queue item "
+                "into an acquisition plan. Still performs no downloads."
+            ),
+        ),
+    ] = False,
+    execution_plan: Annotated[
+        bool,
+        typer.Option(
+            "--execution-plan",
+            help=(
+                "Resolve plans and show the exact sequential batch actions that "
+                "would run. Dry-run only; starts no downloads."
+            ),
+        ),
+    ] = False,
+    apply: Annotated[
+        bool,
+        typer.Option(
+            "--apply",
+            help=(
+                "Sequentially fetch ACTIONABLE items into isolated staging jobs. "
+                "Does not tag, place, complete, or prune the queue."
+            ),
+        ),
+    ] = False,
+    retry_failed: Annotated[
+        bool,
+        typer.Option(
+            "--retry-failed",
+            help=(
+                "With --apply, retry items recorded as failed in durable batch state. "
+                "Previously staged items are never downloaded again."
+            ),
+        ),
+    ] = False,
+    lifecycle_plan: Annotated[
+        bool,
+        typer.Option(
+            "--lifecycle-plan",
+            help=(
+                "Inspect durable batch/staging state and show the next lifecycle "
+                "action for every resolved item. Read-only."
+            ),
+        ),
+    ] = False,
+) -> None:
+    if retry_failed and not apply:
+        console.print(
+            "[bold red]Batch option error:[/bold red] --retry-failed requires --apply."
+        )
+        raise typer.Exit(code=20)
+
+    try:
+        preview = parse_fetch_queue(media_type, queue)
+    except BatchQueueError as exc:
+        console.print(f"[bold red]Batch preview failed:[/bold red] {exc}")
+        raise typer.Exit(code=20) from exc
+
+    render_batch_preview(preview)
+
+    if not resolve_plans and not execution_plan and not apply and not lifecycle_plan:
+        return
+
+    if not preview.items:
+        console.print("[yellow]No valid queue items are available to resolve.[/yellow]")
+        return
+
+    config = load_config()
+    provider = ArchiveOrgProvider()
+    plan_preview = resolve_batch_plans(
+        preview,
+        config.library_root,
+        provider,
+    )
+    render_batch_plan_preview(plan_preview)
+
+    if lifecycle_plan and not apply:
+        lifecycle_preview = build_batch_lifecycle_preview(
+            plan_preview,
+            runtime_root() / "staging",
+            runtime_root() / "state",
+        )
+        render_batch_lifecycle_preview(lifecycle_preview)
+
+    if execution_plan or apply:
+        execution_preview = build_batch_execution_preview(plan_preview)
+        render_batch_execution_preview(execution_preview)
+
+    if apply:
+        fetch_summary = execute_batch_fetches(
+            execution_preview,
+            runtime_root() / "staging",
+            retry_failed=retry_failed,
+        )
+        render_batch_fetch_summary(fetch_summary)
+
+        if lifecycle_plan:
+            lifecycle_preview = build_batch_lifecycle_preview(
+                plan_preview,
+                runtime_root() / "staging",
+                runtime_root() / "state",
+            )
+            render_batch_lifecycle_preview(lifecycle_preview)
+
+        if (
+            fetch_summary.failed_count
+            or fetch_summary.skipped_failed_count
+            or fetch_summary.retry_required_count
+        ):
+            raise typer.Exit(code=22)
+        return
+
+    if plan_preview.failed_count:
+        raise typer.Exit(code=21)
 
 @app.command()
 def plan(
@@ -236,9 +394,9 @@ def compare_command(
 @app.command("adopt")
 def adopt_command(
     job: Annotated[Path | None, typer.Argument(help="Staging job directory. Omit to use the most recent completed job.")] = None,
-    apply: Annotated[bool, typer.Option("--apply", help="Transactionally adopt the latest comparison winner into the staged canonical slot.")] = False,
+    apply: Annotated[bool, typer.Option("--apply", help="Transactionally adopt the latest complete-edition comparison winner into staging.")] = False,
 ) -> None:
-    """Adopt the latest verified comparison winner inside staging."""
+    """Adopt the latest verified complete audio-edition winner inside staging."""
     try:
         job_dir = job if job is not None else latest_staging_job()
     except InspectionError as exc:
@@ -249,17 +407,29 @@ def adopt_command(
         console.print(
             f"[bold]Adoption target:[/bold] {job_dir}\n"
             "[yellow]No staged source changed.[/yellow] "
-            "Re-run with [bold]--apply[/bold] to adopt the latest verified comparison winner."
+            "Re-run with [bold]--apply[/bold] to adopt the latest verified complete-edition winner."
         )
         return
 
     try:
-        result = adopt_latest_recommended_source(job_dir)
+        result = adopt_latest_recommended_edition(job_dir)
     except (AdoptionError, OSError) as exc:
         console.print(f"[bold red]Adoption failed:[/bold red] {exc}")
         raise typer.Exit(code=10) from exc
 
-    render_adoption(result)
+    console.print("[bold green]WHOLE EDITION ADOPTED + VERIFIED[/bold green]")
+    console.print(f"[bold]Recommended edition:[/bold] {result.recommended_label}")
+    console.print(
+        f"[bold]Audio mode:[/bold] "
+        f"{'multi-file' if result.multi_file else 'single-file'}"
+    )
+    console.print(f"[bold]Files:[/bold] {len(result.canonical_paths)}")
+    for path in result.canonical_paths:
+        console.print(f"  [green]✓[/green] {path}")
+    console.print(f"[bold]Rollback:[/bold] {result.backup_dir}")
+    console.print(f"[bold]Comparison report:[/bold] {result.comparison_report_path}")
+    console.print(f"[bold]Updated fetch report:[/bold] {result.report_path}")
+    console.print("[bold green]Final library modified: NO[/bold green]")
 
 
 
@@ -517,6 +687,134 @@ def prune_command(
         raise typer.Exit(code=25) from exc
 
     render_prune_result(result)
+
+
+@app.command("recover-quality")
+def recover_quality_command(
+    job: Annotated[
+        Path,
+        typer.Argument(help="Staging job directory whose failed quality inspection should be retried."),
+    ],
+    apply: Annotated[
+        bool,
+        typer.Option(
+            "--apply",
+            help=(
+                "Update fetch provenance only after staged SHA-256 verification and "
+                "successful quality reinspection. Audio is never modified."
+            ),
+        ),
+    ] = False,
+) -> None:
+    """Recover an inconclusive staged audio-quality inspection without re-downloading."""
+    try:
+        preview = preview_quality_recovery(job)
+    except (QualityRecoveryError, OSError) as exc:
+        console.print(f"[bold red]Quality recovery blocked:[/bold red] {exc}")
+        raise typer.Exit(code=26) from exc
+
+    console.print(f"[bold]Quality recovery target:[/bold] {preview.job_dir}")
+    for item in preview.files:
+        quality = item.quality
+        console.print(
+            f"  • {item.path.name}: codec={quality.codec or 'unknown'}, "
+            f"lossless={quality.lossless}, bitrate={quality.bitrate_bps or 'unknown'}, "
+            f"sample_rate={quality.sample_rate_hz or 'unknown'}, "
+            f"channels={quality.channels or 'unknown'}, "
+            f"source={quality.inspection_source or 'unknown'}"
+        )
+
+    console.print(
+        f"Recoverable warnings: {preview.removable_warning_count}\n"
+        f"Other warnings preserved: {preview.preserved_warning_count}\n"
+        "Audio modified: NO\n"
+        "Library modified: NO"
+    )
+
+    if not apply:
+        console.print(
+            "[yellow]Report not changed.[/yellow] Re-run with [bold]--apply[/bold] "
+            "to record the verified recovery."
+        )
+        return
+
+    try:
+        result = apply_quality_recovery(job)
+    except (QualityRecoveryError, OSError) as exc:
+        console.print(f"[bold red]Quality recovery failed:[/bold red] {exc}")
+        raise typer.Exit(code=27) from exc
+
+    console.print(
+        "[bold green]Quality recovery verified.[/bold green]\n"
+        f"Status: {result.status}\n"
+        f"Warnings removed: {result.removed_warning_count}\n"
+        f"Warnings preserved: {result.preserved_warning_count}\n"
+        f"Report: {result.report_path}\n"
+        "Audio modified: NO\n"
+        "Library modified: NO"
+    )
+
+
+
+@app.command("batch-resolve-sources")
+def batch_resolve_sources_command(
+    media_type: Annotated[
+        MediaType,
+        typer.Argument(help="Media type queue. This slice currently targets audiobooks."),
+    ],
+    queue: Annotated[
+        Path | None,
+        typer.Option("--queue", help="Use a specific fetch-list file."),
+    ] = None,
+    apply: Annotated[
+        bool,
+        typer.Option(
+            "--apply",
+            help=(
+                "Download comparison candidates for COMPARE REQUIRED jobs, rank actual "
+                "quality, and transactionally adopt the winner in staging."
+            ),
+        ),
+    ] = False,
+) -> None:
+    """Preview or apply source comparison/resolution for eligible batch staging jobs."""
+
+    if media_type is not MediaType.AUDIOBOOK:
+        console.print(
+            "[bold red]Batch source resolution blocked:[/bold red] "
+            "this slice currently supports audiobook queues only."
+        )
+        raise typer.Exit(code=28)
+
+    try:
+        preview = parse_fetch_queue(media_type, queue)
+    except BatchQueueError as exc:
+        console.print(f"[bold red]Batch source resolution failed:[/bold red] {exc}")
+        raise typer.Exit(code=28) from exc
+
+    if not preview.items:
+        console.print("[yellow]No valid queue items are available to resolve.[/yellow]")
+        return
+
+    config = load_config()
+    provider = ArchiveOrgProvider()
+    plan_preview = resolve_batch_plans(preview, config.library_root, provider)
+    lifecycle_preview = build_batch_lifecycle_preview(
+        plan_preview,
+        runtime_root() / "staging",
+        runtime_root() / "state",
+    )
+    source_preview = build_batch_source_resolution_preview(lifecycle_preview)
+    render_batch_source_resolution_preview(source_preview)
+
+    if not apply:
+        return
+
+    summary = execute_batch_source_resolution(source_preview)
+    render_batch_source_resolution_summary(summary)
+
+    if summary.failed_count:
+        raise typer.Exit(code=29)
 
 
 if __name__ == "__main__":

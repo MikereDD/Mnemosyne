@@ -1,18 +1,20 @@
 from __future__ import annotations
 
 import json
+import statistics
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
+from .editions import discover_audio_editions
 from .fetcher import FetchError, _stream_download, _validate_audio_signature
-from .models import MediaCandidate, MediaType
+from .models import AudioEdition, MediaCandidate, MediaType
 from .providers.archive_org import ArchiveOrgProvider
 from .quality import ActualAudioQuality, inspect_actual_quality
 
 
 class ComparisonError(RuntimeError):
-    """Candidate comparison could not be completed safely."""
+    """Edition comparison could not be completed safely."""
 
 
 @dataclass(frozen=True)
@@ -22,16 +24,44 @@ class ComparedCandidate:
     actual: ActualAudioQuality
     sha256: str
     actual_size: int
+    expected_size: int | None
+    signature: str
     quality_score: int
+
+
+@dataclass(frozen=True)
+class ComparedEdition:
+    edition: AudioEdition
+    files: tuple[ComparedCandidate, ...]
+    quality_score: int
+    actual_size: int
+    representative_quality: ActualAudioQuality
+
+    @property
+    def multi_file(self) -> bool:
+        return self.edition.multi_file
+
+    @property
+    def label(self) -> str:
+        return self.edition.label
 
 
 @dataclass(frozen=True)
 class ComparisonResult:
     job_dir: Path
     comparison_dir: Path
-    candidates: tuple[ComparedCandidate, ...]
-    recommended: ComparedCandidate
+    editions: tuple[ComparedEdition, ...]
+    recommended: ComparedEdition
     report_path: Path
+
+    @property
+    def candidates(self) -> tuple[ComparedCandidate, ...]:
+        """Compatibility view for older callers when the winner is single-file."""
+        return tuple(
+            file
+            for edition in self.editions
+            for file in edition.files
+        )
 
 
 def _read_report(job_dir: Path) -> dict:
@@ -45,12 +75,6 @@ def _read_report(job_dir: Path) -> dict:
 
 
 def _actual_quality_score(candidate: MediaCandidate, actual: ActualAudioQuality) -> int:
-    """
-    Compare broad quality classes first, then actual stream properties.
-
-    Provenance is deliberately a weak tie-breaker. An Archive 'original'
-    marker must never outweigh a materially better actual derivative.
-    """
     score = 0
 
     if actual.lossless is True:
@@ -73,11 +97,70 @@ def _actual_quality_score(candidate: MediaCandidate, actual: ActualAudioQuality)
     return score
 
 
+def _edition_quality_score(
+    edition: AudioEdition,
+    files: list[ComparedCandidate],
+) -> tuple[int, ActualAudioQuality]:
+    if not files:
+        raise ComparisonError(f"Edition {edition.label!r} contains no compared files.")
+
+    qualities = [file.actual for file in files]
+
+    if all(q.lossless is True for q in qualities):
+        lossless: bool | None = True
+        class_score = 10000
+    elif all(q.lossless is False for q in qualities):
+        lossless = False
+        class_score = 3000
+    else:
+        lossless = None
+        class_score = 1000
+
+    bitrates = [q.bitrate_bps for q in qualities if q.bitrate_bps]
+    sample_rates = [q.sample_rate_hz for q in qualities if q.sample_rate_hz]
+    channels = [q.channels for q in qualities if q.channels]
+
+    # Median prevents one unusually encoded chapter from dominating a whole edition.
+    bitrate = int(statistics.median(bitrates)) if bitrates else None
+    sample_rate = int(statistics.median(sample_rates)) if sample_rates else None
+    channel_count = min(channels) if channels else None
+
+    codecs = {q.codec for q in qualities if q.codec}
+    codec = next(iter(codecs)) if len(codecs) == 1 else "mixed" if codecs else None
+
+    score = class_score
+    if bitrate:
+        score += min(bitrate // 1000, 2000)
+    if sample_rate:
+        score += min(sample_rate // 1000, 192)
+    if channel_count:
+        score += min(channel_count * 10, 80)
+    if edition.source == "original":
+        score += 25
+
+    representative = ActualAudioQuality(
+        codec=codec,
+        lossless=lossless,
+        bitrate_bps=bitrate,
+        sample_rate_hz=sample_rate,
+        channels=channel_count,
+        inspection_warning=None,
+        inspection_source="edition-aggregate",
+    )
+    return score, representative
+
+
 def compare_archive_candidates(
     job_dir: Path,
     *,
     timeout: float = 60.0,
 ) -> ComparisonResult:
+    """
+    Compare complete audiobook editions, never arbitrary playable files.
+
+    A numbered chapter is only compared as a member of its discovered edition.
+    This prevents one high-bitrate chapter from defeating a complete audiobook.
+    """
     job_dir = job_dir.resolve()
     if not job_dir.is_dir():
         raise ComparisonError(f"Staging job directory does not exist: {job_dir}")
@@ -96,6 +179,9 @@ def compare_archive_candidates(
     except ValueError as exc:
         raise ComparisonError(f"Unsupported media type in report: {media_type_text}") from exc
 
+    if media_type is not MediaType.AUDIOBOOK:
+        raise ComparisonError("Edition-aware comparison currently supports audiobooks only.")
+
     provider = ArchiveOrgProvider()
     try:
         item = provider.identify(
@@ -108,14 +194,9 @@ def compare_archive_candidates(
     except Exception as exc:
         raise ComparisonError(f"Could not refresh Archive candidate list: {exc}") from exc
 
-    audio_candidates = sorted(
-        (c for c in item.candidates if c.playable),
-        key=lambda c: (c.score, c.size or 0),
-        reverse=True,
-    )
-
-    if len(audio_candidates) < 2:
-        raise ComparisonError("Fewer than two playable candidates are available to compare.")
+    editions = discover_audio_editions(item.candidates)
+    if len(editions) < 2:
+        raise ComparisonError("Fewer than two complete audio editions are available to compare.")
 
     comparison_root = job_dir / "comparison"
     comparison_root.mkdir(parents=False, exist_ok=True)
@@ -124,69 +205,138 @@ def compare_archive_candidates(
     comparison_dir = comparison_root / run_id
     comparison_dir.mkdir(parents=False, exist_ok=False)
 
-    compared: list[ComparedCandidate] = []
+    compared_editions: list[ComparedEdition] = []
 
-    for index, candidate in enumerate(audio_candidates, start=1):
-        target = comparison_dir / f"{index:02d}-{Path(candidate.name).name}"
+    for edition_index, edition in enumerate(editions, start=1):
+        edition_dir = comparison_dir / f"edition-{edition_index:02d}"
+        edition_dir.mkdir()
 
-        actual_size, sha256 = _stream_download(
-            candidate.url,
-            target,
-            expected_size=candidate.size,
-            timeout=timeout,
-            user_agent="Mnemosyne/0.1.0-dev.6",
-        )
+        compared_files: list[ComparedCandidate] = []
 
-        part_path = target.with_name(target.name + ".part")
-        _validate_audio_signature(part_path, candidate)
-        part_path.replace(target)
+        for file_index, candidate in enumerate(edition.candidates, start=1):
+            target = edition_dir / f"{file_index:02d}-{Path(candidate.name).name}"
 
-        actual = inspect_actual_quality(target)
-        compared.append(
-            ComparedCandidate(
-                candidate=candidate,
-                path=target,
-                actual=actual,
-                sha256=sha256,
-                actual_size=actual_size,
-                quality_score=_actual_quality_score(candidate, actual),
+            actual_size, sha256 = _stream_download(
+                candidate.url,
+                target,
+                expected_size=candidate.size,
+                timeout=timeout,
+                user_agent="Mnemosyne/0.2.0-dev.2",
+            )
+
+            part_path = target.with_name(target.name + ".part")
+            signature = _validate_audio_signature(part_path, candidate)
+            part_path.replace(target)
+
+            actual = inspect_actual_quality(target)
+            if actual.inspection_warning is not None:
+                raise ComparisonError(
+                    f"Quality inspection remained inconclusive for {candidate.name}: "
+                    f"{actual.inspection_warning}"
+                )
+
+            compared_files.append(
+                ComparedCandidate(
+                    candidate=candidate,
+                    path=target,
+                    actual=actual,
+                    sha256=sha256,
+                    actual_size=actual_size,
+                    expected_size=candidate.size,
+                    signature=signature,
+                    quality_score=_actual_quality_score(candidate, actual),
+                )
+            )
+
+        edition_score, representative = _edition_quality_score(edition, compared_files)
+        compared_editions.append(
+            ComparedEdition(
+                edition=edition,
+                files=tuple(compared_files),
+                quality_score=edition_score,
+                actual_size=sum(file.actual_size for file in compared_files),
+                representative_quality=representative,
             )
         )
 
     ranked = sorted(
-        compared,
-        key=lambda c: (c.quality_score, c.actual_size),
+        compared_editions,
+        key=lambda e: (e.quality_score, e.actual_size),
         reverse=True,
     )
     recommended = ranked[0]
 
     comparison_report = {
-        "schemaVersion": 2,
+        "schemaVersion": 3,
         "sourceJob": report.get("jobId"),
         "runId": run_id,
-        "status": "compared",
-        "candidates": [
+        "status": "compared-editions",
+        "comparisonUnit": "complete-audio-edition",
+        "editions": [
             {
-                "sourceName": c.candidate.name,
-                "archiveFormat": c.candidate.archive_format,
-                "archiveSource": c.candidate.source,
-                "providerClaimedLossless": c.candidate.lossless,
-                "actualCodec": c.actual.codec,
-                "actualLossless": c.actual.lossless,
-                "actualBitrateBps": c.actual.bitrate_bps,
-                "actualSampleRateHz": c.actual.sample_rate_hz,
-                "actualChannels": c.actual.channels,
-                "actualSize": c.actual_size,
-                "sha256": c.sha256,
-                "qualityScore": c.quality_score,
-                "comparisonPath": str(c.path),
+                "editionKey": compared.edition.key,
+                "label": compared.edition.label,
+                "multiFile": compared.edition.multi_file,
+                "fileCount": len(compared.files),
+                "extension": compared.edition.extension,
+                "archiveFormat": compared.edition.archive_format,
+                "archiveSource": compared.edition.source,
+                "qualityScore": compared.quality_score,
+                "actualSize": compared.actual_size,
+                "representativeQuality": {
+                    "codec": compared.representative_quality.codec,
+                    "lossless": compared.representative_quality.lossless,
+                    "bitrateBps": compared.representative_quality.bitrate_bps,
+                    "sampleRateHz": compared.representative_quality.sample_rate_hz,
+                    "channels": compared.representative_quality.channels,
+                },
+                "files": [
+                    {
+                        "sourceName": file.candidate.name,
+                        "sourceUrl": file.candidate.url,
+                        "archiveFormat": file.candidate.archive_format,
+                        "archiveSource": file.candidate.source,
+                        "providerClaimedLossless": file.candidate.lossless,
+                        "expectedSize": file.expected_size,
+                        "actualCodec": file.actual.codec,
+                        "actualLossless": file.actual.lossless,
+                        "actualBitrateBps": file.actual.bitrate_bps,
+                        "actualSampleRateHz": file.actual.sample_rate_hz,
+                        "actualChannels": file.actual.channels,
+                        "actualSize": file.actual_size,
+                        "sha256": file.sha256,
+                        "signature": file.signature,
+                        "comparisonPath": str(file.path),
+                    }
+                    for file in compared.files
+                ],
             }
-            for c in ranked
+            for compared in ranked
         ],
-        "recommendedSourceName": recommended.candidate.name,
-        "recommendedPath": str(recommended.path),
+        "recommendedEditionKey": recommended.edition.key,
+        "recommendedLabel": recommended.edition.label,
+        "recommendedMultiFile": recommended.edition.multi_file,
+        "recommendedFileCount": len(recommended.files),
         "finalLibraryModified": False,
     }
+
+    # Preserve the old single-file recommendation fields only when they are truthful.
+    if not recommended.edition.multi_file and len(recommended.files) == 1:
+        winner = recommended.files[0]
+        comparison_report["recommendedSourceName"] = winner.candidate.name
+        comparison_report["recommendedPath"] = str(winner.path)
+        comparison_report["candidates"] = [
+            {
+                "sourceName": winner.candidate.name,
+                "archiveFormat": winner.candidate.archive_format,
+                "archiveSource": winner.candidate.source,
+                "providerClaimedLossless": winner.candidate.lossless,
+                "expectedSize": winner.expected_size,
+                "sha256": winner.sha256,
+                "signature": winner.signature,
+                "comparisonPath": str(winner.path),
+            }
+        ]
 
     report_path = comparison_dir / "comparison-report.json"
     report_path.write_text(
@@ -197,7 +347,7 @@ def compare_archive_candidates(
     return ComparisonResult(
         job_dir=job_dir,
         comparison_dir=comparison_dir,
-        candidates=tuple(ranked),
+        editions=tuple(ranked),
         recommended=recommended,
         report_path=report_path,
     )

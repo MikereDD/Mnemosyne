@@ -6,6 +6,17 @@ from rich.table import Table
 from rich.text import Text
 
 from .adoption import AdoptionResult
+from .batch import (
+    BatchExecutionPreview,
+    BatchFetchSummary,
+    BatchPlanPreview,
+    BatchPreview,
+)
+from .batch_lifecycle import BatchLifecyclePreview
+from .batch_source_resolution import (
+    BatchSourceResolutionPreview,
+    BatchSourceResolutionSummary,
+)
 from .comparison import ComparisonResult
 from .completion import CompletionPreview, CompletionResult
 from .cleanup import CleanupPreview, CleanupResult
@@ -41,6 +52,447 @@ def _duration(value: float | None) -> str:
         return f"{hours}:{minutes:02d}:{seconds:02d}"
     return f"{minutes}:{seconds:02d}"
 
+
+
+
+def render_batch_preview(preview: BatchPreview) -> None:
+    console.print(
+        Panel.fit(
+            "[bold]Mnemosyne[/bold]\n[dim]Fetch-list batch preview[/dim]",
+            border_style="cyan",
+        )
+    )
+
+    summary = Table(show_header=False, box=None, pad_edge=False)
+    summary.add_column(style="bold")
+    summary.add_column()
+    summary.add_row("Media", preview.media_type.value)
+    summary.add_row("Queue", str(preview.queue_path))
+    summary.add_row("Lines", str(preview.total_lines))
+    summary.add_row("Ready items", str(preview.ready_count))
+    summary.add_row("Duplicates", str(preview.duplicate_count))
+    summary.add_row("Invalid", str(preview.invalid_count))
+    summary.add_row("Comments", str(preview.comment_lines))
+    summary.add_row("Blank", str(preview.blank_lines))
+    console.print(summary)
+
+    if preview.items:
+        items = Table(title="Batch items")
+        items.add_column("#", justify="right")
+        items.add_column("Line", justify="right")
+        items.add_column("Provider")
+        items.add_column("Identifier")
+        items.add_column("Canonical URL")
+        for index, item in enumerate(preview.items, start=1):
+            items.add_row(
+                str(index),
+                str(item.line_number),
+                "Internet Archive",
+                item.identifier,
+                item.canonical_url,
+            )
+        console.print(items)
+
+    issues = [*preview.duplicates, *preview.invalid]
+    if issues:
+        issue_table = Table(title="Queue issues")
+        issue_table.add_column("Line", justify="right")
+        issue_table.add_column("Kind")
+        issue_table.add_column("Detail")
+        issue_table.add_column("Source")
+        for issue in sorted(issues, key=lambda value: value.line_number):
+            style = "yellow" if issue.kind == "duplicate" else "red"
+            issue_table.add_row(
+                str(issue.line_number),
+                f"[{style}]{issue.kind.upper()}[/{style}]",
+                issue.detail,
+                issue.source_text.strip(),
+            )
+        console.print(issue_table)
+
+    if not preview.items:
+        console.print("[yellow]No valid batch items are ready.[/yellow]")
+
+    console.print(
+        Panel(
+            "Preview only. No network requests were made.\n"
+            "Queue file modified: NO\n"
+            "Downloads started: NO",
+            border_style="yellow",
+        )
+    )
+
+
+
+def render_batch_plan_preview(preview: BatchPlanPreview) -> None:
+    console.print(
+        Panel.fit(
+            "[bold]Mnemosyne[/bold]\n[dim]Batch acquisition plan resolution[/dim]",
+            border_style="cyan",
+        )
+    )
+
+    summary = Table(show_header=False, box=None, pad_edge=False)
+    summary.add_column(style="bold")
+    summary.add_column()
+    summary.add_row("Resolved", str(len(preview.items)))
+    summary.add_row("Actionable", str(preview.actionable_count))
+    summary.add_row("Blocked", str(preview.blocked_count))
+    summary.add_row("Failed", str(preview.failed_count))
+    console.print(summary)
+
+    table = Table(title="Resolved batch plans")
+    table.add_column("#", justify="right")
+    table.add_column("Line", justify="right")
+    table.add_column("Status")
+    table.add_column("Title")
+    table.add_column("Creator")
+    table.add_column("Year")
+    table.add_column("Year source")
+    table.add_column("Edition")
+    table.add_column("Files", justify="right")
+    table.add_column("Warnings", justify="right")
+
+    for index, item in enumerate(preview.items, start=1):
+        if item.status == "actionable":
+            status = "[green]ACTIONABLE[/green]"
+        elif item.status == "blocked":
+            status = "[yellow]BLOCKED[/yellow]"
+        else:
+            status = "[red]FAILED[/red]"
+
+        table.add_row(
+            str(index),
+            str(item.line_number),
+            status,
+            item.title or "?",
+            item.creator or "?",
+            str(item.year) if item.year else "?",
+            item.year_provenance,
+            item.selected_edition or "?",
+            str(item.audio_file_count),
+            str(item.warning_count),
+        )
+    console.print(table)
+
+    for item in preview.items:
+        if item.error:
+            console.print(
+                f"[red]Line {item.line_number} {item.identifier}:[/red] {item.error}"
+            )
+            continue
+        if item.warnings:
+            console.print(
+                f"[yellow]Line {item.line_number} {item.identifier} warnings:[/yellow]"
+            )
+            for warning in item.warnings:
+                console.print(f"  • {warning}")
+        if item.destination is not None:
+            console.print(
+                f"[dim]Line {item.line_number} destination:[/dim] {item.destination}"
+            )
+
+    console.print(
+        Panel(
+            "Plan resolution may read provider metadata over the network.\n"
+            "Media downloads started: NO\n"
+            "Queue file modified: NO\n"
+            "Library modified: NO",
+            border_style="yellow",
+        )
+    )
+
+def render_batch_execution_preview(preview: BatchExecutionPreview) -> None:
+    console.print(
+        Panel.fit(
+            "[bold]Mnemosyne[/bold]\n[dim]Batch execution dry-run[/dim]",
+            border_style="cyan",
+        )
+    )
+
+    summary = Table(show_header=False, box=None, pad_edge=False)
+    summary.add_column(style="bold")
+    summary.add_column()
+    summary.add_row("Would execute", str(preview.execute_count))
+    summary.add_row("Skip blocked", str(preview.blocked_count))
+    summary.add_row("Skip failed", str(preview.failed_count))
+    summary.add_row("Execution mode", "Sequential")
+    summary.add_row("Failure policy", "Continue to next item")
+    console.print(summary)
+
+    table = Table(title="Execution sequence")
+    table.add_column("Seq", justify="right")
+    table.add_column("Line", justify="right")
+    table.add_column("Action")
+    table.add_column("Identifier")
+    table.add_column("Title")
+    table.add_column("Destination")
+
+    for item in preview.items:
+        if item.action == "execute":
+            action = "[green]WOULD EXECUTE[/green]"
+            sequence = str(item.sequence)
+        elif item.action == "skip-blocked":
+            action = "[yellow]SKIP BLOCKED[/yellow]"
+            sequence = "—"
+        else:
+            action = "[red]SKIP FAILED[/red]"
+            sequence = "—"
+
+        table.add_row(
+            sequence,
+            str(item.line_number),
+            action,
+            item.identifier,
+            item.title or "?",
+            str(item.destination) if item.destination is not None else "—",
+        )
+
+    console.print(table)
+
+    for item in preview.items:
+        if item.reason:
+            console.print(
+                f"[dim]Line {item.line_number} {item.identifier}: "
+                f"{item.reason}[/dim]"
+            )
+
+    console.print(
+        Panel(
+            "Dry-run only. Execution has NOT started.\n"
+            "Processing order: sequential\n"
+            "Failure policy: continue to next item\n"
+            "Media downloads started: NO\n"
+            "Staging modified: NO\n"
+            "Queue file modified: NO\n"
+            "Library modified: NO",
+            border_style="yellow",
+        )
+    )
+
+
+def render_batch_lifecycle_preview(preview: BatchLifecyclePreview) -> None:
+    console.print(
+        Panel.fit(
+            "[bold]Mnemosyne[/bold]\n[dim]Batch lifecycle plan[/dim]",
+            border_style="cyan",
+        )
+    )
+
+    table = Table(title="Audiobook lifecycle state")
+    table.add_column("Line", justify="right")
+    table.add_column("Status")
+    table.add_column("Identifier")
+    table.add_column("Job")
+    table.add_column("Next / Detail")
+
+    labels = {
+        "blocked": "[yellow]BLOCKED[/yellow]",
+        "plan-failed": "[red]PLAN FAILED[/red]",
+        "retry-required": "[yellow]RETRY REQUIRED[/yellow]",
+        "not-staged": "[dim]NOT STAGED[/dim]",
+        "needs-attention": "[yellow]NEEDS ATTENTION[/yellow]",
+        "compare-required": "[cyan]COMPARE REQUIRED[/cyan]",
+        "ready-to-tag": "[cyan]READY TO TAG[/cyan]",
+        "verify-readiness": "[cyan]VERIFY READINESS[/cyan]",
+        "ready-to-place": "[green]READY TO PLACE[/green]",
+        "ready-to-complete": "[green]READY TO COMPLETE[/green]",
+        "complete": "[bold green]COMPLETE[/bold green]",
+    }
+
+    for item in preview.items:
+        table.add_row(
+            str(item.line_number),
+            labels.get(item.status, item.status.upper()),
+            item.identifier,
+            item.job_id or "—",
+            item.detail,
+        )
+
+    console.print(table)
+    console.print(
+        Panel(
+            "Read-only lifecycle inspection.\n"
+            "Downloads started: NO\n"
+            "Staging modified: NO\n"
+            "Library modified: NO\n"
+            "Queue modified: NO",
+            border_style="yellow",
+        )
+    )
+
+
+def render_batch_source_resolution_preview(
+    preview: BatchSourceResolutionPreview,
+) -> None:
+    console.print(
+        Panel.fit(
+            "[bold]Mnemosyne[/bold]\n[dim]Batch source-resolution preview[/dim]",
+            border_style="cyan",
+        )
+    )
+
+    table = Table(title="Source resolution")
+    table.add_column("Line", justify="right")
+    table.add_column("Action")
+    table.add_column("Identifier")
+    table.add_column("Job")
+    table.add_column("Detail")
+
+    for item in preview.items:
+        action = (
+            "[cyan]WOULD RESOLVE[/cyan]"
+            if item.status == "would-resolve"
+            else "[dim]SKIP[/dim]"
+        )
+        table.add_row(
+            str(item.line_number),
+            action,
+            item.identifier,
+            item.job_id or "—",
+            item.detail,
+        )
+
+    console.print(table)
+    console.print(
+        Panel(
+            f"Eligible jobs: {preview.actionable_count}\n"
+            "Dry-run only. No comparison downloads have started.\n"
+            "Final library modified: NO\n"
+            "Queue modified: NO",
+            border_style="yellow",
+        )
+    )
+
+
+def render_batch_source_resolution_summary(
+    summary: BatchSourceResolutionSummary,
+) -> None:
+    console.print(
+        Panel.fit(
+            "[bold]Mnemosyne[/bold]\n[dim]Batch source-resolution result[/dim]",
+            border_style="cyan",
+        )
+    )
+
+    console.print(f"Resolved  {summary.resolved_count}")
+    console.print(f"Failed    {summary.failed_count}")
+    console.print(f"Skipped   {summary.skipped_count}")
+
+    table = Table(title="Source-resolution results")
+    table.add_column("Line", justify="right")
+    table.add_column("Status")
+    table.add_column("Identifier")
+    table.add_column("Recommended")
+    table.add_column("Adopted staged path / Error")
+
+    for item in summary.results:
+        if item.status == "resolved":
+            status = "[green]RESOLVED[/green]"
+            detail = str(item.adopted_path or "—")
+        elif item.status == "failed":
+            status = "[red]FAILED[/red]"
+            detail = item.error or "Unknown failure"
+        else:
+            status = "[dim]SKIPPED[/dim]"
+            detail = "—"
+
+        table.add_row(
+            str(item.line_number),
+            status,
+            item.identifier,
+            item.recommended_source or "—",
+            detail,
+        )
+
+    console.print(table)
+    console.print(
+        Panel(
+            "Comparison candidates may have been downloaded into staging.\n"
+            "Winning source adoption is transactional with rollback evidence.\n"
+            "Final library modified: NO\n"
+            "Queue modified: NO",
+            border_style="yellow",
+        )
+    )
+
+
+def render_batch_fetch_summary(summary: BatchFetchSummary) -> None:
+    console.print(
+        Panel.fit(
+            "[bold]Mnemosyne[/bold]\n[dim]Batch fetch result[/dim]",
+            border_style="cyan",
+        )
+    )
+
+    counts = Table(show_header=False, box=None, pad_edge=False)
+    counts.add_column(style="bold")
+    counts.add_column()
+    counts.add_row("Staged now", str(summary.staged_count))
+    counts.add_row("Already staged", str(summary.already_staged_count))
+    counts.add_row("Fetch failed", str(summary.failed_count))
+    counts.add_row("Retry required", str(summary.retry_required_count))
+    counts.add_row("Blocked", str(summary.blocked_count))
+    counts.add_row("Plan failed", str(summary.skipped_failed_count))
+    counts.add_row("State", str(summary.state_path))
+    console.print(counts)
+
+    table = Table(title="Batch fetch results")
+    table.add_column("Line", justify="right")
+    table.add_column("Status")
+    table.add_column("Identifier")
+    table.add_column("Job")
+    table.add_column("Staging")
+    table.add_column("Warnings", justify="right")
+
+    for item in summary.items:
+        if item.status == "staged":
+            status = "[green]STAGED[/green]"
+        elif item.status == "already-staged":
+            status = "[cyan]ALREADY STAGED[/cyan]"
+        elif item.status == "blocked":
+            status = "[yellow]BLOCKED[/yellow]"
+        elif item.status == "retry-required":
+            status = "[yellow]RETRY REQUIRED[/yellow]"
+        elif item.status == "skipped-failed":
+            status = "[red]PLAN FAILED[/red]"
+        else:
+            status = "[red]FETCH FAILED[/red]"
+
+        table.add_row(
+            str(item.line_number),
+            status,
+            item.identifier,
+            item.job_id or "—",
+            str(item.staging_dir) if item.staging_dir is not None else "—",
+            str(item.warning_count),
+        )
+
+    console.print(table)
+
+    for item in summary.items:
+        if item.error:
+            console.print(
+                f"[red]Line {item.line_number} {item.identifier}: "
+                f"{item.error}[/red]"
+            )
+
+    console.print(
+        Panel(
+            "Batch fetch finished.\n"
+            "Processing order: sequential\n"
+            "Failure policy: continue to next item\n"
+            "ACTIONABLE items may have modified staging: YES\n"
+            "Metadata/tagging applied: NO\n"
+            "Library modified: NO\n"
+            "Queue file modified: NO\n"
+            f"Durable batch state: {summary.state_path}\n"
+            "Previously staged items re-downloaded: NO\n"
+            "Failed items retried automatically: NO\n"
+            "Queue auto-pruned: NO",
+            border_style="yellow",
+        )
+    )
 
 
 def render_plan(plan: AcquisitionPlan) -> None:
@@ -287,26 +739,43 @@ def render_multifile_inspection(result: MultiFileInspection) -> None:
 
 
 def render_comparison(result: ComparisonResult) -> None:
-    console.print(Panel.fit("[bold]Mnemosyne[/bold]\n[dim]Actual candidate quality comparison[/dim]", border_style="cyan"))
-    table = Table(title="Downloaded candidate comparison")
+    console.print(
+        Panel.fit(
+            "[bold]Mnemosyne[/bold]\n[dim]Complete audio-edition quality comparison[/dim]",
+            border_style="cyan",
+        )
+    )
+    table = Table(title="Downloaded edition comparison")
     table.add_column("Rank", justify="right")
-    table.add_column("Source file")
-    table.add_column("Archive label")
+    table.add_column("Edition")
+    table.add_column("Files", justify="right")
+    table.add_column("Format")
     table.add_column("Actual codec")
     table.add_column("Quality")
-    table.add_column("Bitrate", justify="right")
-    table.add_column("Size", justify="right")
+    table.add_column("Median bitrate", justify="right")
+    table.add_column("Total size", justify="right")
     table.add_column("Score", justify="right")
 
-    for index, compared in enumerate(result.candidates, start=1):
-        actual = compared.actual
-        quality = "lossless" if actual.lossless is True else "lossy" if actual.lossless is False else "unknown"
-        bitrate = f"{actual.bitrate_bps / 1000:.1f} kbps" if actual.bitrate_bps else "?"
+    for index, compared in enumerate(result.editions, start=1):
+        actual = compared.representative_quality
+        quality = (
+            "lossless"
+            if actual.lossless is True
+            else "lossy"
+            if actual.lossless is False
+            else "mixed/unknown"
+        )
+        bitrate = (
+            f"{actual.bitrate_bps / 1000:.1f} kbps"
+            if actual.bitrate_bps
+            else "?"
+        )
         rank = f"[green]{index} ✓[/green]" if compared is result.recommended else str(index)
         table.add_row(
             rank,
-            compared.candidate.name,
-            compared.candidate.archive_format or "?",
+            compared.edition.label,
+            str(len(compared.files)),
+            compared.edition.archive_format or compared.edition.extension,
             actual.codec or "?",
             quality,
             bitrate,
@@ -317,8 +786,8 @@ def render_comparison(result: ComparisonResult) -> None:
     console.print(table)
     console.print(
         Panel(
-            f"[bold]Recommended actual source:[/bold] {result.recommended.candidate.name}\n"
-            f"[bold]Actual codec:[/bold] {result.recommended.actual.codec or '?'}\n"
+            f"[bold]Recommended complete edition:[/bold] {result.recommended.edition.label}\n"
+            f"[bold]Files:[/bold] {len(result.recommended.files)}\n"
             f"[bold]Comparison report:[/bold] {result.report_path}\n\n"
             "[bold green]Final library modified: NO[/bold green]",
             border_style="green",
@@ -832,16 +1301,32 @@ def render_multifile_placement_preview(preview) -> None:
     table.add_row("Audio files", str(len(preview.audio_sources)))
     table.add_row("Edition SHA-256", preview.edition_sha256)
     table.add_row("Cover SHA-256", preview.cover_sha256)
+    if getattr(preview, "existing_destination_equivalent", False):
+        table.add_row("Placement mode", "Verified existing destination")
     console.print(table)
+
+    if getattr(preview, "existing_destination_equivalent", False):
+        detail = (
+            "[bold yellow]Preview only.[/bold yellow]\n"
+            "The existing destination has been verified equivalent to the certified staged edition.\n"
+            "Apply records placement provenance only; existing library media will not be rewritten."
+        )
+    else:
+        detail = (
+            "[bold yellow]Preview only.[/bold yellow]\n"
+            "Apply copies the entire edition into a hidden sibling directory, "
+            "verifies it, then commits with one directory rename."
+        )
+
     console.print(Panel(
-        "[bold yellow]Preview only.[/bold yellow]\n"
-        "Apply copies the entire edition into a hidden sibling directory, "
-        "verifies it, then commits with one directory rename.",
+        detail,
         border_style="yellow",
     ))
 
 
 def render_multifile_placement_result(result) -> None:
+    existing = bool(getattr(result, "verified_existing_destination", False))
+
     table = Table(show_header=False, box=None, pad_edge=False)
     table.add_column(style="bold")
     table.add_column()
@@ -851,16 +1336,39 @@ def render_multifile_placement_result(result) -> None:
     table.add_row("Cover", str(result.cover_path))
     table.add_row("Cover SHA-256", result.cover_sha256)
     table.add_row("Placement report", str(result.placement_report_path))
+    if existing:
+        table.add_row("Placement mode", "Verified existing destination")
+
+    title = (
+        "[bold green]EXISTING MULTI-FILE DESTINATION VERIFIED[/bold green]"
+        if existing
+        else "[bold green]MULTI-FILE PLACED + VERIFIED[/bold green]"
+    )
+
     console.print(Panel(
         table,
-        title="[bold green]MULTI-FILE PLACED + VERIFIED[/bold green]",
+        title=title,
         border_style="green",
     ))
+
+    if existing:
+        detail = (
+            "[bold]Existing destination overwritten: NO[/bold]\n"
+            "[bold]Existing destination equivalence verification: PASSED[/bold]\n"
+            "[bold]Existing library media rewritten: NO[/bold]\n"
+            "[bold]Final library modified: NO[/bold]\n"
+            "[bold]Placement provenance updated: YES[/bold]"
+        )
+    else:
+        detail = (
+            "[bold]Existing destination overwritten: NO[/bold]\n"
+            "[bold]Pre-commit whole-edition verification: PASSED[/bold]\n"
+            "[bold]Post-placement whole-edition verification: PASSED[/bold]\n"
+            "[bold]Final library modified: YES[/bold]"
+        )
+
     console.print(Panel(
-        "[bold]Existing destination overwritten: NO[/bold]\n"
-        "[bold]Pre-commit whole-edition verification: PASSED[/bold]\n"
-        "[bold]Post-placement whole-edition verification: PASSED[/bold]\n"
-        "[bold]Final library modified: YES[/bold]",
+        detail,
         border_style="cyan",
     ))
 

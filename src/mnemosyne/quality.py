@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+import shutil
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -13,6 +16,8 @@ class ActualAudioQuality:
     bitrate_bps: int | None
     sample_rate_hz: int | None
     channels: int | None
+    inspection_warning: str | None = None
+    inspection_source: str | None = None
 
 
 def _codec_from_parser(audio: object, path: Path) -> tuple[str | None, bool | None]:
@@ -33,38 +38,121 @@ def _codec_from_parser(audio: object, path: Path) -> tuple[str | None, bool | No
         return "Vorbis", False
     if suffix == ".aac":
         return "AAC", False
-
     return None, None
 
 
+def _lossless_from_codec(codec: str | None) -> bool | None:
+    if not codec:
+        return None
+    text = codec.lower()
+    if any(token in text for token in ("alac", "flac", "pcm", "wavpack", "ape")):
+        return True
+    if any(token in text for token in ("aac", "mp3", "opus", "vorbis", "ac3", "eac3", "mp2")):
+        return False
+    return None
+
+
+def _int_or_none(value: object) -> int | None:
+    if value in (None, "", "N/A"):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _inspect_with_ffprobe(path: Path) -> ActualAudioQuality | None:
+    executable = shutil.which("ffprobe")
+    if executable is None:
+        return None
+
+    try:
+        completed = subprocess.run(
+            [
+                executable,
+                "-v", "error",
+                "-select_streams", "a:0",
+                "-show_entries",
+                "stream=codec_name,codec_long_name,bit_rate,sample_rate,channels",
+                "-of", "json",
+                str(path),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+    if completed.returncode != 0:
+        return None
+
+    try:
+        payload = json.loads(completed.stdout)
+    except json.JSONDecodeError:
+        return None
+
+    streams = payload.get("streams") or []
+    if not streams or not isinstance(streams[0], dict):
+        return None
+
+    stream = streams[0]
+    codec = str(stream.get("codec_name") or stream.get("codec_long_name") or "").strip() or None
+
+    return ActualAudioQuality(
+        codec=codec,
+        lossless=_lossless_from_codec(codec),
+        bitrate_bps=_int_or_none(stream.get("bit_rate")),
+        sample_rate_hz=_int_or_none(stream.get("sample_rate")),
+        channels=_int_or_none(stream.get("channels")),
+        inspection_warning=None,
+        inspection_source="ffprobe",
+    )
+
+
 def inspect_actual_quality(path: Path) -> ActualAudioQuality:
-    audio = MutagenFile(path)
-    if audio is None or getattr(audio, "info", None) is None:
+    mutagen_error: Exception | None = None
+    try:
+        audio = MutagenFile(path)
+    except Exception as exc:
+        audio = None
+        mutagen_error = exc
+
+    if mutagen_error is not None:
+        fallback = _inspect_with_ffprobe(path)
+        if fallback is not None:
+            return fallback
         return ActualAudioQuality(
             codec=None,
             lossless=None,
             bitrate_bps=None,
             sample_rate_hz=None,
             channels=None,
+            inspection_warning=(
+                "Actual audio quality inspection failed; the downloaded file "
+                "passed container/signature validation but could not be parsed "
+                f"for codec details: {mutagen_error}"
+            ),
+            inspection_source=None,
+        )
+
+    if audio is None or getattr(audio, "info", None) is None:
+        fallback = _inspect_with_ffprobe(path)
+        if fallback is not None:
+            return fallback
+        return ActualAudioQuality(
+            codec=None,
+            lossless=None,
+            bitrate_bps=None,
+            sample_rate_hz=None,
+            channels=None,
+            inspection_source=None,
         )
 
     info = audio.info
     codec = getattr(info, "codec", None) or getattr(info, "codec_description", None)
-    codec_text = str(codec).lower() if codec else ""
-
-    lossless: bool | None = None
-
-    if codec_text:
-        if "alac" in codec_text or "flac" in codec_text or "pcm" in codec_text:
-            lossless = True
-        elif (
-            "mp4a.40" in codec_text
-            or "aac" in codec_text
-            or "mp3" in codec_text
-            or "opus" in codec_text
-            or "vorbis" in codec_text
-        ):
-            lossless = False
+    lossless = _lossless_from_codec(str(codec) if codec else None)
 
     if codec is None or lossless is None:
         parser_codec, parser_lossless = _codec_from_parser(audio, path)
@@ -76,9 +164,11 @@ def inspect_actual_quality(path: Path) -> ActualAudioQuality:
     return ActualAudioQuality(
         codec=str(codec) if codec else None,
         lossless=lossless,
-        bitrate_bps=int(info.bitrate) if getattr(info, "bitrate", None) is not None else None,
-        sample_rate_hz=int(info.sample_rate) if getattr(info, "sample_rate", None) is not None else None,
-        channels=int(info.channels) if getattr(info, "channels", None) is not None else None,
+        bitrate_bps=_int_or_none(getattr(info, "bitrate", None)),
+        sample_rate_hz=_int_or_none(getattr(info, "sample_rate", None)),
+        channels=_int_or_none(getattr(info, "channels", None)),
+        inspection_warning=None,
+        inspection_source="mutagen",
     )
 
 

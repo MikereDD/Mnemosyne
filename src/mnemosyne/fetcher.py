@@ -370,6 +370,8 @@ def _download_audio_candidate(
         provider_claimed_lossless=candidate.lossless,
         actual=actual,
     )
+    if quality_warning is None:
+        quality_warning = actual.inspection_warning
 
     return StagedFile(
         path=target,
