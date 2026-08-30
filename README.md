@@ -5,12 +5,12 @@
 <h1 align="center">Mnemosyne</h1>
 
 <p align="center">
-  <strong>Media acquisition that understands what the library should become.</strong>
+  <strong>Media organization that understands what the library should become.</strong>
 </p>
 
 <p align="center">
-  A safety-first acquisition, normalization, and verification pipeline for
-  ebooks, audiobooks, and music.
+  A safety-first acquisition, organization, normalization, and verification system
+  for books, audio, music, and video.
 </p>
 
 <p align="center">
@@ -44,21 +44,29 @@ Most download tools stop when the bytes arrive.
 
 **Mnemosyne does not.**
 
-Mnemosyne is a provider-based media acquisition pipeline built around the idea
-that a successful acquisition is not merely a downloaded file — it is media
-that has been identified, validated, normalized, verified, placed into a
-deterministic library structure, and proven correct before temporary evidence
-is removed.
+Mnemosyne is a media acquisition, organization, normalization, and verification
+system built around one idea: media should not merely exist on disk — it should
+be identified, placed into a deliberate library structure, normalized
+consistently, and proven correct before Mnemosyne considers the work complete.
 
-Its core workflow is:
+Acquisition is one first-class workflow:
 
 ```text
 Discover → Identify → Preview / Plan → Fetch → Normalize → Verify → Place → Complete
 ```
 
+Existing-library organization is a second first-class workflow:
+
+```text
+Scan → Identify → Classify → Preview / Plan → Normalize → Rename / Move → Verify
+```
+
+Both workflows are intended to converge on the same identity, metadata,
+planning, safety, provenance, and verification machinery.
+
 Every mutating stage is designed to make its intent visible first and to refuse
-unsafe shortcuts such as silent overwrites, partial multi-file placement, or
-unverified cleanup.
+unsafe shortcuts such as silent overwrites, partial placement, low-confidence
+guessing, or unverified cleanup.
 
 ## What Mnemosyne does
 
@@ -178,53 +186,36 @@ Write durable receipt
 Explicitly remove staging
 ```
 
-## Canonical library layouts
+## Target canonical library layouts
 
-### Audiobooks — single file
-
-```text
-Author/
-└── Audiobook/
-    └── Title - Author (Date)/
-        ├── Title - Author (Date).m4b
-        └── cover.jpg
-```
-
-### Audiobooks — chapter set
+Mnemosyne distinguishes stable structural relationships from descriptive
+metadata. Genre is structural for the music filesystem, but not for books or
+video.
 
 ```text
-Author/
-└── Audiobook/
-    └── Title - Author (Date)/
-        ├── 01 - Chapter Title.mp3
-        ├── 02 - Chapter Title.mp3
-        ├── ...
-        └── cover.jpg
+Music        → Genre / Artist / Album
+eBooks       → Author / Series? / Book
+Audiobooks   → Author / Series? / Book
+Movies       → Title (Year)
+Documentary  → Title (Year)
+TV           → Series (Start Year - End Year/Continuing)
+               └── Season NN (Premiere Year)
 ```
 
-### eBooks
+Music uses a **canonical base genre** for physical placement. More specific
+sub-genres remain embedded metadata. For example, a track tagged `Celtic Punk`
+may be stored beneath `Music/Punk/...` while retaining `Celtic Punk` in its
+tags.
 
-```text
-Author/
-└── eBook/
-    └── Title - Author (Date)/
-        ├── Title - Author (Date).epub
-        ├── Title - Author (Date).pdf
-        └── cover.jpg
-```
+Books and video do **not** use genre in the physical hierarchy. Their genre
+labels remain metadata so authors, series, films, and documentaries are not
+fragmented across subjective or overlapping genre trees.
 
-### Music
+For TV, `Continuing` is used only when the series status is positively known.
+An unknown end year must not be silently interpreted as an active series.
 
-```text
-Band/
-└── Band Name - Album (Date)/
-    ├── 01 - Track Title.flac
-    ├── 02 - Track Title.flac
-    └── cover.jpg
-```
-
-See [`docs/library-layout.md`](docs/library-layout.md) for the evolving library
-conventions.
+See [`docs/library-layout.md`](docs/library-layout.md) for the canonical
+conventions and examples.
 
 ## Development quick start
 
@@ -327,7 +318,10 @@ Default acquisition output is organized below:
 $HOME/Downloads/Mnemosyne/
 ├── Audiobooks/
 ├── eBooks/
-└── Music/
+├── Music/
+├── Movies/
+├── TV/
+└── Documentary/
 ```
 
 No username-specific absolute paths are required by the application.
@@ -377,6 +371,8 @@ See:
 ## Design principles
 
 - **Understand before changing.**
+- **Organize by stable structure; keep descriptive ambiguity in metadata.**
+- **Never silently guess when confidence is low.**
 - **Preview before mutation.**
 - **Preserve source quality whenever practical.**
 - **Treat provider metadata as provisional until verified.**

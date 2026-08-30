@@ -6,20 +6,36 @@
 
 - **Name:** Mnemosyne
 - Standalone repositories are maintained on Forgejo and GitHub.
-- First-class media types:
+- First-class media families:
   - eBooks
   - Audiobooks
   - Music
-- Mnemosyne is intended to be more than a downloader: it is a media acquisition and library-normalization pipeline.
-- The implementation language/framework and final license remain intentionally undecided.
+  - Movies
+  - TV
+  - Documentary
+- Mnemosyne is more than a downloader: it is a media acquisition, organization, normalization, and verification system.
+- Acquisition and existing-library normalization are first-class workflows that share the same identity, planning, safety, provenance, and verification machinery.
 
-## Core workflow
 
-**Discover → Identify → Preview/Plan → Fetch → Rename → Fetch Cover → Tag/Embed → Verify**
+## Core workflows
+
+Acquisition:
+
+**Discover → Identify → Preview/Plan → Fetch → Normalize → Verify → Place → Complete**
+
+Existing-library normalization:
+
+**Scan → Identify → Classify → Preview/Plan → Normalize → Rename/Move → Verify**
+
+Both workflows must converge on shared internal models rather than developing
+independent rules.
 
 Core principles:
 
 - Preview before mutation.
+- Organize by stable structural relationships; keep descriptive ambiguity in metadata.
+- Never silently guess when identification confidence is low.
+- Preserve metadata provenance for decisions that affect canonical placement.
 - Preserve original media quality whenever practical.
 - Never silently overwrite valuable existing media.
 - Keep provider-specific behavior behind provider interfaces.
@@ -70,7 +86,10 @@ Default acquisition/library root:
 $HOME\Downloads\Mnemosyne\
 ├── Audiobooks\
 ├── eBooks\
-└── Music\
+├── Music\
+├── Movies\
+├── TV\
+└── Documentary\
 ```
 
 The user may change this through configuration.
@@ -79,52 +98,57 @@ Changing the configured library root must **not** automatically move existing me
 
 ## Canonical library layouts
 
-### eBooks
+Canonical structural model:
 
 ```text
-$HOME\Downloads\Mnemosyne\eBooks\
-└── Author\
-    └── eBook\
-        └── Title - Author (Date)\
-            ├── Title - Author (Date).epub
-            ├── Title - Author (Date).pdf
-            └── cover.jpg
+Music        → Genre / Artist / Album
+eBooks       → Author / Series? / Book
+Audiobooks   → Author / Series? / Book
+Movies       → Title (Year)
+Documentary  → Title (Year)
+TV           → Series (Start Year - End Year/Continuing)
+               └── Season NN (Premiere Year)
 ```
 
-### Audiobooks
+### Filesystem genre policy
 
-Single-file audiobook:
+Music uses a canonical **base genre** for physical organization. Detailed
+sub-genres remain metadata. For example, `Celtic Punk` may be tagged as such
+while being physically placed beneath `Music/Punk/...`.
+
+eBooks, audiobooks, movies, TV, and documentaries do not use genre as a
+physical hierarchy. Genre remains metadata so works are not fragmented across
+subjective or overlapping categories.
+
+### Series and lifecycle policy
+
+Book/audiobook series membership is structural when known, so an optional
+series layer is used between author and book.
+
+TV uses series lifetime and season premiere year as structural information:
 
 ```text
-$HOME\Downloads\Mnemosyne\Audiobooks\
-└── Author\
-    └── Audiobook\
-        └── Title - Author (Date)\
-            ├── Title - Author (Date).m4b
-            └── cover.jpg
+Series Title (2024 - Continuing)/
+└── Season 01 (2024)/
 ```
 
-Multi-file audiobook:
+A completed series becomes:
 
 ```text
-Author\
-└── Audiobook\
-    └── Title - Author (Date)\
-        ├── 01 - Chapter Title.mp3
-        ├── 02 - Chapter Title.mp3
-        └── cover.jpg
+Series Title (2024 - 2027)/
 ```
 
-### Music
+A one-year completed series may use:
 
 ```text
-$HOME\Downloads\Mnemosyne\Music\
-└── Band\
-    └── Band Name - Album (Date)\
-        ├── 01 - Track Title.flac
-        ├── 02 - Track Title.flac
-        └── cover.jpg
+Series Title (2019)/
 ```
+
+`Continuing` must never be inferred merely from a missing end year. The active
+status must be positively identified; otherwise planning should expose the
+ambiguity.
+
+Detailed canonical examples live in `docs/library-layout.md`.
 
 ## Naming and metadata goals
 
@@ -152,7 +176,7 @@ No hard-coded usernames or user-specific paths.
 
 ## Cover handling
 
-Cover retrieval is part of the normal workflow for all three media types.
+Cover/artwork retrieval is part of the normal workflow for supported media families where artwork is applicable.
 
 Canonical standalone filename:
 
@@ -170,6 +194,41 @@ Mnemosyne should:
 - Preserve the standalone `cover.jpg` even when artwork is embedded.
 
 For audiobooks, audiobook-specific artwork should be preferred when it identifies the actual narrator/publisher/edition. For music, prefer official square album artwork for the selected release.
+
+## Existing-library normalization
+
+Mnemosyne should organize media the user already owns using the same safety
+philosophy as acquisition.
+
+Identification precedence:
+
+1. Embedded metadata.
+2. Existing folder structure.
+3. Filename parsing.
+4. External metadata lookup only when needed.
+
+A normalization scan should remain read-only until a plan is approved.
+
+Potential findings include:
+
+- Artists located beneath the wrong canonical base genre
+- Over-specific music genre folders
+- Inconsistent artist/author/title naming
+- Incorrect or missing series structure
+- Duplicate album/book/movie folders
+- Stray tracks, chapters, or episodes
+- Inconsistent TV season naming/year structure
+- Missing or inconsistent artwork
+- Metadata conflicts
+- Low-confidence identities requiring review
+
+The organizer should support incremental approval rather than requiring an
+entire library to be reorganized in one operation.
+
+Cross-format understanding is also a roadmap goal. Mnemosyne should eventually
+be able to recognize an eBook and audiobook as two representations of the same
+underlying work while keeping their physical libraries separate.
+
 
 ## Single-link acquisition
 
