@@ -61,14 +61,14 @@ TV           → Series (Start Year - End Year/Continuing)
 ## Phase 2 — Batch acquisition and recovery
 
 - [x] Read-only fetch-list parsing and duplicate classification
-- [ ] Safe batch acquisition-plan resolution
-- [ ] Verified metadata provenance gates for canonical placement
-- [ ] Queue-local or explicit metadata overrides
-- [ ] Sequential batch execution through the proven single-item engine
-- [ ] Per-item COMPLETE / FAILED / NEEDS ATTENTION / SKIPPED reporting
-- [ ] Resume / retry across interrupted jobs
-- [ ] Durable batch state / recovery
-- [ ] Individual retry without blindly rerunning completed work
+- [x] Safe batch acquisition-plan resolution
+- [x] Verified metadata provenance gates for canonical placement
+- [x] Queue-local verified year overrides
+- [x] Sequential batch execution through the proven single-item engine
+- [x] Per-item staged / failed / blocked / retry-required reporting
+- [x] Resume / retry across interrupted batch jobs
+- [x] Durable batch state / recovery
+- [x] Individual retry without blindly rerunning staged work
 - [ ] Detailed CLI help and recovery guidance
 - [ ] CI and fault-injection coverage
 
