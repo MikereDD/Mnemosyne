@@ -1583,3 +1583,4 @@ def render_multifile_cleanup_result(result) -> None:
         "[bold]Staging job: REMOVED[/bold]",
         border_style="cyan",
     ))
+
