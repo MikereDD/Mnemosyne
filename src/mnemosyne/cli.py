@@ -23,6 +23,7 @@ from .completion import CompletionError, apply_completion, preview_completion
 from .cleanup import CleanupError, apply_cleanup, preview_cleanup
 from .config import initialize_runtime, load_config, runtime_root
 from .fetcher import FetchError, fetch_plan_to_staging
+from .ebook_fetcher import EbookFetchResult, fetch_ebook_plan_to_staging
 from .inspection import (
     InspectionError,
     inspect_multifile_staging_job,
@@ -72,6 +73,7 @@ from .render import (
     render_batch_preview,
     render_comparison,
     render_fetch_result,
+    render_ebook_fetch_result,
     render_inspection,
     render_multifile_inspection,
     render_plan,
@@ -351,8 +353,9 @@ def fetch(
     title: Annotated[str | None, typer.Option("--title", help="Verified title override.")] = None,
     creator: Annotated[str | None, typer.Option("--creator", help="Verified author/artist override.")] = None,
     audio_format: Annotated[str | None, typer.Option("--audio-format", help="Prefer a complete audio edition by extension, e.g. mp3, m4b, flac.")] = None,
+    ebook_format: Annotated[str | None, typer.Option("--ebook-format", help="Prefer an eBook edition by extension, e.g. epub, azw3, mobi, pdf.")] = None,
 ) -> None:
-    """Fetch the planned audio edition into staging only."""
+    """Fetch the selected media edition into isolated staging only."""
     _, plan_result = _build_plan(
         media_type,
         url,
@@ -360,7 +363,7 @@ def fetch(
         title=title,
         creator=creator,
         audio_format=audio_format,
-        ebook_format=None,
+        ebook_format=ebook_format,
     )
     render_plan(plan_result)
 
@@ -373,12 +376,24 @@ def fetch(
         raise typer.Exit(code=3)
 
     try:
-        result = fetch_plan_to_staging(plan_result, runtime_root() / "staging")
+        if media_type is MediaType.EBOOK:
+            ebook_result = fetch_ebook_plan_to_staging(
+                plan_result,
+                runtime_root() / "staging",
+            )
+        else:
+            result = fetch_plan_to_staging(
+                plan_result,
+                runtime_root() / "staging",
+            )
     except (FetchError, OSError) as exc:
         console.print(f"[bold red]Fetch failed:[/bold red] {exc}")
         raise typer.Exit(code=4) from exc
 
-    render_fetch_result(result)
+    if media_type is MediaType.EBOOK:
+        render_ebook_fetch_result(ebook_result)
+    else:
+        render_fetch_result(result)
 
 
 @app.command("inspect")

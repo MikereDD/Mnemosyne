@@ -21,6 +21,7 @@ from .comparison import ComparisonResult
 from .completion import CompletionPreview, CompletionResult
 from .cleanup import CleanupPreview, CleanupResult
 from .fetcher import FetchResult
+from .ebook_fetcher import EbookFetchResult
 from .inspection import MetadataInspection, MultiFileInspection
 from .models import AcquisitionPlan, CandidateKind
 from .placement import PlacementPreview, PlacementResult
@@ -616,6 +617,38 @@ def render_plan(plan: AcquisitionPlan) -> None:
     )
 
 
+
+
+def render_ebook_fetch_result(result: EbookFetchResult) -> None:
+    table = Table(show_header=False, box=None, pad_edge=False)
+    table.add_column(style="bold")
+    table.add_column()
+    table.add_row("Job", result.job_id)
+    table.add_row("Staging", str(result.staging_dir))
+    table.add_row("eBook", str(result.ebook.path))
+    table.add_row("Actual format", result.ebook.signature)
+    table.add_row("Size", _size(result.ebook.actual_size))
+    table.add_row("SHA-256", result.ebook.sha256)
+    table.add_row("Source file", result.ebook.source_name)
+    table.add_row("Report", str(result.report_path))
+
+    console.print(
+        Panel(
+            table,
+            title="[bold green]EBOOK STAGED + VERIFIED[/bold green]",
+            border_style="green",
+        )
+    )
+    console.print(
+        Panel(
+            "Download completed\n"
+            "Actual format verified\n"
+            "SHA-256 recorded\n"
+            "[bold]Staging modified: YES[/bold]\n"
+            "[bold]Library modified: NO[/bold]",
+            border_style="cyan",
+        )
+    )
 
 def render_fetch_result(result: FetchResult) -> None:
     table = Table(show_header=False, box=None, pad_edge=False)
