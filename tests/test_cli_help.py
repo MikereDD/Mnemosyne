@@ -10,9 +10,13 @@ from mnemosyne.cli import app
 runner = CliRunner()
 
 
+_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+
+
 def _normalized(text: str) -> str:
-    """Collapse Rich/Typer wrapping so help tests assert meaning, not width."""
-    return re.sub(r"\s+", " ", text).strip()
+    """Strip ANSI styling and collapse wrapping so help tests assert meaning."""
+    without_ansi = _ANSI_ESCAPE_RE.sub("", text)
+    return re.sub(r"\s+", " ", without_ansi).strip()
 
 
 def test_top_level_help_explains_both_workflows_and_safety() -> None:
