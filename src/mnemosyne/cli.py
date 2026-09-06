@@ -24,7 +24,11 @@ from .cleanup import CleanupError, apply_cleanup, preview_cleanup
 from .config import initialize_runtime, load_config, runtime_root
 from .fetcher import FetchError, fetch_plan_to_staging
 from .ebook_fetcher import EbookFetchResult, fetch_ebook_plan_to_staging
-from .ebook_placement import EbookPlacementError, preview_ebook_placement
+from .ebook_placement import (
+    EbookPlacementError,
+    apply_ebook_placement,
+    preview_ebook_placement,
+)
 from .inspection import (
     InspectionError,
     inspect_multifile_staging_job,
@@ -76,6 +80,7 @@ from .render import (
     render_fetch_result,
     render_ebook_fetch_result,
     render_ebook_placement_preview,
+    render_ebook_placement_result,
     render_inspection,
     render_multifile_inspection,
     render_plan,
@@ -608,18 +613,37 @@ def ebook_place_command(
         Path,
         typer.Argument(help="Verified eBook staging job directory."),
     ],
+    apply: Annotated[
+        bool,
+        typer.Option(
+            "--apply",
+            help="Transactionally copy the verified staged eBook into the final library.",
+        ),
+    ] = False,
 ) -> None:
-    """Preview normalized metadata and final eBook placement. Read-only."""
+    """Preview or transactionally apply final eBook placement."""
     config = load_config()
     try:
         preview = preview_ebook_placement(job, config.library_root)
     except (EbookPlacementError, OSError) as exc:
         console.print(
-            f"[bold red]eBook placement preview blocked:[/bold red] {exc}"
+            f"[bold red]eBook placement blocked:[/bold red] {exc}"
         )
         raise typer.Exit(code=26) from exc
 
-    render_ebook_placement_preview(preview)
+    if not apply:
+        render_ebook_placement_preview(preview)
+        return
+
+    try:
+        result = apply_ebook_placement(job, config.library_root)
+    except (EbookPlacementError, OSError) as exc:
+        console.print(
+            f"[bold red]eBook placement failed:[/bold red] {exc}"
+        )
+        raise typer.Exit(code=27) from exc
+
+    render_ebook_placement_result(result)
 
 
 @app.command("complete")

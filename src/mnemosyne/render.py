@@ -22,7 +22,7 @@ from .completion import CompletionPreview, CompletionResult
 from .cleanup import CleanupPreview, CleanupResult
 from .fetcher import FetchResult
 from .ebook_fetcher import EbookFetchResult
-from .ebook_placement import EbookPlacementPreview
+from .ebook_placement import EbookPlacementPreview, EbookPlacementResult
 from .inspection import MetadataInspection, MultiFileInspection
 from .models import AcquisitionPlan, CandidateKind
 from .placement import PlacementPreview, PlacementResult
@@ -653,6 +653,37 @@ def render_ebook_placement_preview(preview: EbookPlacementPreview) -> None:
             "Staging modified: NO\n"
             "[bold]Library modified: NO[/bold]",
             border_style="yellow",
+        )
+    )
+
+
+def render_ebook_placement_result(result: EbookPlacementResult) -> None:
+    summary = Table(show_header=False, box=None, pad_edge=False)
+    summary.add_column(style="bold")
+    summary.add_column()
+    summary.add_row("Transaction", result.transaction_id)
+    summary.add_row("Staged source", str(result.source_path))
+    summary.add_row("Final directory", str(result.destination_dir))
+    summary.add_row("Final file", str(result.destination_path))
+    summary.add_row("SHA-256", result.sha256)
+    summary.add_row("Placement report", str(result.placement_report_path))
+    summary.add_row("Fetch report", str(result.fetch_report_path))
+
+    console.print(
+        Panel(
+            summary,
+            title="[bold green]EBOOK PLACED + VERIFIED[/bold green]",
+            border_style="green",
+        )
+    )
+    console.print(
+        Panel(
+            "Transactional copy completed.\n"
+            "Pre-commit SHA-256 verification: PASSED\n"
+            "Post-placement SHA-256 verification: PASSED\n"
+            "Staged source retained: YES\n"
+            "[bold]Library modified: YES[/bold]",
+            border_style="green",
         )
     )
 

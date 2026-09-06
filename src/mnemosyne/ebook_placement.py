@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import shutil
+import uuid
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -11,7 +15,7 @@ from .paths import canonical_destination, sanitize_component
 
 
 class EbookPlacementError(RuntimeError):
-    """Read-only eBook placement planning could not be completed safely."""
+    """eBook placement could not be completed safely."""
 
 
 @dataclass(frozen=True)
@@ -29,6 +33,18 @@ class EbookPlacementPreview:
     conflict: bool
 
 
+@dataclass(frozen=True)
+class EbookPlacementResult:
+    job_dir: Path
+    source_path: Path
+    destination_dir: Path
+    destination_path: Path
+    sha256: str
+    transaction_id: str
+    placement_report_path: Path
+    fetch_report_path: Path
+
+
 def _read_json(path: Path) -> dict[str, Any]:
     try:
         return json.loads(path.read_text(encoding="utf-8"))
@@ -36,6 +52,20 @@ def _read_json(path: Path) -> dict[str, Any]:
         raise EbookPlacementError(
             f"Could not read eBook staging report {path}: {exc}"
         ) from exc
+
+
+def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex[:8]}.tmp")
+    try:
+        temporary.write_text(
+            json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        _read_json(temporary)
+        os.replace(temporary, path)
+    finally:
+        if temporary.exists():
+            temporary.unlink(missing_ok=True)
 
 
 def _sha256(path: Path) -> str:
@@ -105,6 +135,11 @@ def preview_ebook_placement(
         )
 
     verification = report.get("verification") or {}
+    if verification.get("formatVerified") is not True:
+        raise EbookPlacementError(
+            "Staged eBook does not have a positive actual-format verification."
+        )
+
     expected_sha = str(verification.get("sha256") or "").strip().lower()
     if not expected_sha:
         raise EbookPlacementError(
@@ -164,3 +199,174 @@ def preview_ebook_placement(
         actual_sha256=actual_sha,
         conflict=False,
     )
+
+
+def _create_parent_chain(path: Path) -> list[Path]:
+    missing: list[Path] = []
+    cursor = path
+    while not cursor.exists():
+        missing.append(cursor)
+        if cursor.parent == cursor:
+            break
+        cursor = cursor.parent
+
+    path.mkdir(parents=True, exist_ok=True)
+    return list(reversed(missing))
+
+
+def _cleanup_empty_parents(created: list[Path]) -> None:
+    for path in reversed(created):
+        try:
+            path.rmdir()
+        except OSError:
+            break
+
+
+def apply_ebook_placement(
+    job_dir: Path,
+    library_root: Path,
+) -> EbookPlacementResult:
+    preview = preview_ebook_placement(job_dir, library_root)
+
+    report_path = preview.job_dir / "ebook-fetch-report.json"
+    original_report = _read_json(report_path)
+    previous_report = json.loads(json.dumps(original_report))
+
+    destination = preview.destination_dir
+    parent = destination.parent
+    created_parents = _create_parent_chain(parent)
+
+    transaction_id = f"ebook-placement-{uuid.uuid4().hex[:8]}"
+    temporary_dir = parent / f".mnemosyne-{transaction_id}"
+    placement_report_path = preview.job_dir / "ebook-placement-report.json"
+
+    if temporary_dir.exists():
+        _cleanup_empty_parents(created_parents)
+        raise EbookPlacementError(
+            f"Placement transaction directory already exists: {temporary_dir}"
+        )
+
+    destination_created = False
+    placement_report_written = False
+
+    try:
+        temporary_dir.mkdir(exist_ok=False)
+        temporary_file = temporary_dir / preview.destination_path.name
+
+        shutil.copy2(preview.source_path, temporary_file)
+
+        copied_sha = _sha256(temporary_file)
+        if copied_sha != preview.actual_sha256:
+            raise EbookPlacementError(
+                "Copied eBook failed SHA-256 verification before commit."
+            )
+
+        if destination.exists():
+            raise EbookPlacementError(
+                "Final eBook destination appeared during placement; refusing commit: "
+                f"{destination}"
+            )
+
+        os.replace(temporary_dir, destination)
+        destination_created = True
+
+        final_path = destination / preview.destination_path.name
+        if not final_path.is_file():
+            raise EbookPlacementError(
+                "Final eBook file is missing immediately after placement."
+            )
+
+        final_sha = _sha256(final_path)
+        if final_sha != preview.actual_sha256:
+            raise EbookPlacementError(
+                "Final-library eBook failed post-placement SHA-256 verification."
+            )
+
+        placed_at = datetime.now(timezone.utc).isoformat()
+        placement_report = {
+            "schemaVersion": 1,
+            "transactionId": transaction_id,
+            "jobId": original_report.get("jobId"),
+            "status": "placed-and-verified",
+            "placedAt": placed_at,
+            "mediaType": "ebook",
+            "source": {
+                "stagedPath": str(preview.source_path),
+                "sha256": preview.actual_sha256,
+            },
+            "destination": {
+                "directory": str(destination),
+                "file": str(final_path),
+                "sha256": final_sha,
+            },
+            "verification": {
+                "stagedHashReverified": True,
+                "preCommitCopyHash": "passed",
+                "postPlacementHash": "passed",
+            },
+            "rollback": {
+                "mode": "remove-new-destination",
+                "overwroteExistingDestination": False,
+            },
+        }
+        _write_json_atomic(placement_report_path, placement_report)
+        placement_report_written = True
+
+        history = original_report.setdefault("placementHistory", [])
+        history.append(
+            {
+                "transactionId": transaction_id,
+                "placedAt": placed_at,
+                "destination": str(destination),
+                "file": str(final_path),
+                "sha256": final_sha,
+                "placementReport": str(placement_report_path),
+                "verification": "passed",
+            }
+        )
+        original_report["schemaVersion"] = max(
+            int(original_report.get("schemaVersion") or 0),
+            2,
+        )
+        original_report["status"] = "placed-and-verified"
+        original_report["finalLibraryModified"] = True
+        original_report["finalPlacement"] = {
+            "status": "verified",
+            "transactionId": transaction_id,
+            "placedAt": placed_at,
+            "destination": str(destination),
+            "file": str(final_path),
+            "sha256": final_sha,
+            "placementReport": str(placement_report_path),
+        }
+
+        _write_json_atomic(report_path, original_report)
+
+        return EbookPlacementResult(
+            job_dir=preview.job_dir,
+            source_path=preview.source_path,
+            destination_dir=destination,
+            destination_path=final_path,
+            sha256=final_sha,
+            transaction_id=transaction_id,
+            placement_report_path=placement_report_path,
+            fetch_report_path=report_path,
+        )
+
+    except Exception:
+        if temporary_dir.exists():
+            shutil.rmtree(temporary_dir, ignore_errors=True)
+
+        if destination_created and destination.exists():
+            shutil.rmtree(destination, ignore_errors=True)
+
+        if placement_report_written and placement_report_path.exists():
+            placement_report_path.unlink(missing_ok=True)
+
+        try:
+            _write_json_atomic(report_path, previous_report)
+        except Exception:
+            pass
+
+        _cleanup_empty_parents(created_parents)
+        raise
