@@ -123,6 +123,7 @@ def _build_plan(
     title: str | None,
     creator: str | None,
     audio_format: str | None,
+    ebook_format: str | None,
 ):
     config = load_config()
     provider = ArchiveOrgProvider()
@@ -143,6 +144,7 @@ def _build_plan(
         item,
         config.library_root,
         preferred_audio_format=audio_format,
+        preferred_ebook_format=ebook_format,
     )
 
 
@@ -325,6 +327,7 @@ def plan(
     title: Annotated[str | None, typer.Option("--title", help="Verified title override.")] = None,
     creator: Annotated[str | None, typer.Option("--creator", help="Verified author/artist override.")] = None,
     audio_format: Annotated[str | None, typer.Option("--audio-format", help="Prefer a complete audio edition by extension, e.g. mp3, m4b, flac.")] = None,
+    ebook_format: Annotated[str | None, typer.Option("--ebook-format", help="Prefer an eBook edition by extension, e.g. epub, azw3, mobi, pdf. Preview only.")] = None,
 ) -> None:
     """Discover an item and print the proposed acquisition plan. Writes no media."""
     _, plan_result = _build_plan(
@@ -334,6 +337,7 @@ def plan(
         title=title,
         creator=creator,
         audio_format=audio_format,
+        ebook_format=ebook_format,
     )
     render_plan(plan_result)
 
@@ -356,6 +360,7 @@ def fetch(
         title=title,
         creator=creator,
         audio_format=audio_format,
+        ebook_format=None,
     )
     render_plan(plan_result)
 

@@ -546,6 +546,46 @@ def render_plan(plan: AcquisitionPlan) -> None:
                 members.add_row(str(index), candidate.name, _size(candidate.size))
             console.print(members)
 
+    if plan.ebook_editions:
+        ebooks = Table(title="eBook editions")
+        ebooks.add_column("Rank", justify="right")
+        ebooks.add_column("Edition")
+        ebooks.add_column("File")
+        ebooks.add_column("Format")
+        ebooks.add_column("Source")
+        ebooks.add_column("Size", justify="right")
+        ebooks.add_column("Score", justify="right")
+
+        for index, edition in enumerate(plan.ebook_editions, start=1):
+            selected = edition.key == plan.selected_ebook_edition_key
+            ebooks.add_row(
+                f"[green]{index} ✓[/green]" if selected else str(index),
+                edition.label,
+                edition.candidate.name,
+                edition.archive_format or edition.extension,
+                edition.source or "?",
+                _size(edition.size),
+                str(edition.score),
+            )
+        console.print(ebooks)
+
+        selected_ebook = next(
+            (
+                edition
+                for edition in plan.ebook_editions
+                if edition.key == plan.selected_ebook_edition_key
+            ),
+            None,
+        )
+        if selected_ebook:
+            console.print(
+                "[bold]Selected eBook:[/bold] "
+                f"{selected_ebook.candidate.name} "
+                f"([dim]{selected_ebook.source or '?'}; "
+                f"score {selected_ebook.score}; "
+                f"{_size(selected_ebook.size)}[/dim])"
+            )
+
     auxiliary = [c for c in item.candidates if c.kind is CandidateKind.AUXILIARY]
     if auxiliary:
         excluded_names = ", ".join(c.name for c in auxiliary[:8])
@@ -566,8 +606,11 @@ def render_plan(plan: AcquisitionPlan) -> None:
 
     console.print(
         Panel(
-            "[bold green]Plan complete.[/bold green]\n"
-            "Provider quality claims remain provisional until downloaded files are inspected.",
+            "[bold green]Acquisition plan ready.[/bold green]\n"
+            "Preview only. Media downloads started: NO\n"
+            "Staging modified: NO\n"
+            "Library modified: NO\n"
+            "Provider metadata remains evidence until downloaded files are verified.",
             border_style="green",
         )
     )
