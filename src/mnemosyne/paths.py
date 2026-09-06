@@ -46,8 +46,7 @@ def canonical_destination(
             library_root
             / "eBooks"
             / creator_part
-            / "eBook"
-            / f"{title_part} - {creator_part} ({date_part})"
+            / title_part
         )
 
     return (
