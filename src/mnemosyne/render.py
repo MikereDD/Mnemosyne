@@ -647,10 +647,10 @@ def render_ebook_placement_preview(preview: EbookPlacementPreview) -> None:
     )
     console.print(
         Panel(
-            "Read-only normalization + placement preview.\\n"
-            "Staged SHA-256 re-verified: YES\\n"
-            "Destination conflict detected: NO\\n"
-            "Staging modified: NO\\n"
+            "Read-only normalization + placement preview.\n"
+            "Staged SHA-256 re-verified: YES\n"
+            "Destination conflict detected: NO\n"
+            "Staging modified: NO\n"
             "[bold]Library modified: NO[/bold]",
             border_style="yellow",
         )
@@ -1583,4 +1583,5 @@ def render_multifile_cleanup_result(result) -> None:
         "[bold]Staging job: REMOVED[/bold]",
         border_style="cyan",
     ))
+
 
