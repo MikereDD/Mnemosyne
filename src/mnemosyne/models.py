@@ -62,6 +62,17 @@ class AudioEdition(BaseModel):
     sequence_numbers: list[int] = Field(default_factory=list)
 
 
+class EbookEdition(BaseModel):
+    key: str
+    label: str
+    extension: str
+    archive_format: str | None = None
+    source: str | None = None
+    candidate: MediaCandidate
+    score: int = 0
+    size: int | None = None
+
+
 class AcquisitionPlan(BaseModel):
     item: ArchiveItem
     destination: Path
@@ -70,3 +81,6 @@ class AcquisitionPlan(BaseModel):
     warnings: list[str] = Field(default_factory=list)
     audio_editions: list[AudioEdition] = Field(default_factory=list)
     selected_edition_key: str | None = None
+    selected_ebook: MediaCandidate | None = None
+    ebook_editions: list[EbookEdition] = Field(default_factory=list)
+    selected_ebook_edition_key: str | None = None

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from .editions import choose_audio_edition, discover_audio_editions
+from .ebook_editions import choose_ebook_edition, discover_ebook_editions
 from .models import AcquisitionPlan, CandidateKind, MediaType
 from .paths import canonical_destination
 
@@ -10,6 +11,7 @@ def build_plan(
     library_root,
     *,
     preferred_audio_format: str | None = None,
+    preferred_ebook_format: str | None = None,
 ) -> AcquisitionPlan:
     warnings: list[str] = []
 
@@ -40,6 +42,26 @@ def build_plan(
     if item.media_type is MediaType.AUDIOBOOK and not selected_audio:
         warnings.append("No playable audiobook audio edition was found.")
 
+    ebook_editions = discover_ebook_editions(item.candidates)
+    selected_ebook_edition = choose_ebook_edition(
+        ebook_editions,
+        preferred_format=preferred_ebook_format,
+    )
+    selected_ebook = (
+        selected_ebook_edition.candidate
+        if selected_ebook_edition
+        else None
+    )
+
+    if preferred_ebook_format and selected_ebook_edition is None:
+        warnings.append(
+            f"No eBook edition matched preferred format "
+            f"{preferred_ebook_format!r}."
+        )
+
+    if item.media_type is MediaType.EBOOK and selected_ebook is None:
+        warnings.append("No supported eBook edition was found.")
+
     cover_candidates = sorted(
         (c for c in item.candidates if c.kind is CandidateKind.COVER),
         key=lambda candidate: (candidate.score, candidate.size or 0),
@@ -65,4 +87,9 @@ def build_plan(
         warnings=warnings,
         audio_editions=editions,
         selected_edition_key=selected_edition.key if selected_edition else None,
+        selected_ebook=selected_ebook,
+        ebook_editions=ebook_editions,
+        selected_ebook_edition_key=(
+            selected_ebook_edition.key if selected_ebook_edition else None
+        ),
     )
