@@ -24,6 +24,7 @@ from .cleanup import CleanupError, apply_cleanup, preview_cleanup
 from .config import initialize_runtime, load_config, runtime_root
 from .fetcher import FetchError, fetch_plan_to_staging
 from .ebook_fetcher import EbookFetchResult, fetch_ebook_plan_to_staging
+from .ebook_placement import EbookPlacementError, preview_ebook_placement
 from .inspection import (
     InspectionError,
     inspect_multifile_staging_job,
@@ -74,6 +75,7 @@ from .render import (
     render_comparison,
     render_fetch_result,
     render_ebook_fetch_result,
+    render_ebook_placement_preview,
     render_inspection,
     render_multifile_inspection,
     render_plan,
@@ -598,6 +600,26 @@ def place_command(
     else:
         render_placement_result(result)
 
+
+
+@app.command("ebook-place")
+def ebook_place_command(
+    job: Annotated[
+        Path,
+        typer.Argument(help="Verified eBook staging job directory."),
+    ],
+) -> None:
+    """Preview normalized metadata and final eBook placement. Read-only."""
+    config = load_config()
+    try:
+        preview = preview_ebook_placement(job, config.library_root)
+    except (EbookPlacementError, OSError) as exc:
+        console.print(
+            f"[bold red]eBook placement preview blocked:[/bold red] {exc}"
+        )
+        raise typer.Exit(code=26) from exc
+
+    render_ebook_placement_preview(preview)
 
 
 @app.command("complete")

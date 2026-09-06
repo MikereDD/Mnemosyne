@@ -22,6 +22,7 @@ from .completion import CompletionPreview, CompletionResult
 from .cleanup import CleanupPreview, CleanupResult
 from .fetcher import FetchResult
 from .ebook_fetcher import EbookFetchResult
+from .ebook_placement import EbookPlacementPreview
 from .inspection import MetadataInspection, MultiFileInspection
 from .models import AcquisitionPlan, CandidateKind
 from .placement import PlacementPreview, PlacementResult
@@ -618,6 +619,42 @@ def render_plan(plan: AcquisitionPlan) -> None:
 
 
 
+
+
+def render_ebook_placement_preview(preview: EbookPlacementPreview) -> None:
+    summary = Table(show_header=False, box=None, pad_edge=False)
+    summary.add_column(style="bold")
+    summary.add_column()
+    summary.add_row("Title", preview.title)
+    summary.add_row("Author", preview.creator)
+    summary.add_row(
+        "Year",
+        str(preview.year) if preview.year is not None else "Unknown",
+    )
+    summary.add_row("Format", preview.extension.lstrip(".").upper())
+    summary.add_row("Staged source", str(preview.source_path))
+    summary.add_row("Destination dir", str(preview.destination_dir))
+    summary.add_row("Destination file", str(preview.destination_path))
+    summary.add_row("SHA-256", preview.actual_sha256)
+    summary.add_row("Conflict", "NO")
+
+    console.print(
+        Panel(
+            summary,
+            title="[bold cyan]EBOOK PLACEMENT PREVIEW[/bold cyan]",
+            border_style="cyan",
+        )
+    )
+    console.print(
+        Panel(
+            "Read-only normalization + placement preview.\\n"
+            "Staged SHA-256 re-verified: YES\\n"
+            "Destination conflict detected: NO\\n"
+            "Staging modified: NO\\n"
+            "[bold]Library modified: NO[/bold]",
+            border_style="yellow",
+        )
+    )
 
 def render_ebook_fetch_result(result: EbookFetchResult) -> None:
     table = Table(show_header=False, box=None, pad_edge=False)
