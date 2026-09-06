@@ -99,7 +99,18 @@ from .render import (
 from .tagging import TaggingError, apply_metadata_normalization, preview_metadata_normalization
 
 app = typer.Typer(
-    help="Mnemosyne media acquisition and library-normalization pipeline.",
+    help=(
+        "Mnemosyne is a safety-first media acquisition, organization, "
+        "normalization, and verification system.\n\n"
+        "Acquisition workflow:\n"
+        "Discover -> Identify -> Preview/Plan -> Fetch -> Normalize -> "
+        "Verify -> Place -> Complete\n\n"
+        "Existing-library workflow:\n"
+        "Scan -> Identify -> Classify -> Preview/Plan -> Normalize -> "
+        "Rename/Move -> Verify\n\n"
+        "Safety rule: preview before mutation. Mnemosyne surfaces ambiguity "
+        "instead of silently guessing or overwriting valuable media."
+    ),
     no_args_is_help=True,
 )
 
@@ -213,6 +224,30 @@ def batch_command(
         ),
     ] = False,
 ) -> None:
+    """Preview, plan, or stage a fetch queue without hiding lifecycle state.
+
+    With no mode option, this command only parses and previews the queue.
+
+    --resolve-plans retrieves provider metadata and resolves valid queue items
+    into acquisition plans. It does not download media.
+
+    --execution-plan additionally shows the deterministic sequential actions
+    that would run. It remains read-only.
+
+    --apply fetches ACTIONABLE items into isolated staging jobs only. It does
+    not automatically tag, place, complete, clean staging, or prune queue
+    entries.
+
+    --retry-failed is valid only with --apply and explicitly retries items
+    recorded as failed. Valid previously staged items are not downloaded again.
+
+    --lifecycle-plan is read-only and reports the next lifecycle action from
+    durable batch and staging state.
+
+    Provider-derived canonical dates remain provisional when verified
+    provenance is required for placement. Resolve BLOCKED items rather than
+    bypassing their safety warnings.
+    """
     if retry_failed and not apply:
         console.print(
             "[bold red]Batch option error:[/bold red] --retry-failed requires --apply."
