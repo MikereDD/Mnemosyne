@@ -13,6 +13,19 @@ PLAYABLE_AUDIO_EXTENSIONS = {
     ".mp3", ".ogg", ".oga", ".opus", ".aac", ".wma",
 }
 
+EBOOK_EXTENSIONS = {
+    ".epub", ".pdf", ".mobi", ".azw", ".azw3", ".djvu",
+}
+
+BASE_EBOOK_SCORES = {
+    ".epub": 900,
+    ".azw3": 820,
+    ".mobi": 780,
+    ".azw": 760,
+    ".pdf": 700,
+    ".djvu": 620,
+}
+
 AUXILIARY_EXTENSIONS = {
     ".afpk", ".xml", ".sqlite", ".m3u", ".torrent", ".txt", ".json",
 }
@@ -193,6 +206,8 @@ class ArchiveOrgProvider(Provider):
 
         if playable:
             kind = CandidateKind.AUDIO
+        elif extension in EBOOK_EXTENSIONS:
+            kind = CandidateKind.EBOOK
         elif extension in IMAGE_EXTENSIONS:
             kind = CandidateKind.COVER
         elif extension in AUXILIARY_EXTENSIONS or "metadata" in format_lower:
@@ -223,6 +238,15 @@ class ArchiveOrgProvider(Provider):
                 reasons.append(f"{bitrate:g} kbps")
         else:
             bitrate = None
+
+        if kind is CandidateKind.EBOOK:
+            score += BASE_EBOOK_SCORES.get(extension, 400)
+            reasons.append("eBook format")
+            if source == "original":
+                score += 120
+                reasons.append("Archive original")
+            elif source == "derivative":
+                reasons.append("Archive derivative")
 
         if kind is CandidateKind.COVER:
             lower_name = name.lower()

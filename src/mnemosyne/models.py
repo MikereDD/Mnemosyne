@@ -15,6 +15,7 @@ class MediaType(StrEnum):
 
 class CandidateKind(StrEnum):
     AUDIO = "audio"
+    EBOOK = "ebook"
     COVER = "cover"
     AUXILIARY = "auxiliary"
     UNKNOWN = "unknown"

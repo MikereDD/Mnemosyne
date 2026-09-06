@@ -70,7 +70,7 @@ TV           → Series (Start Year - End Year/Continuing)
 - [x] Durable batch state / recovery
 - [x] Individual retry without blindly rerunning staged work
 - [x] Detailed CLI help and recovery guidance
-- [ ] CI and fault-injection coverage
+- [x] CI and fault-injection coverage
 
 ## Phase 3 — Generalize acquisition
 
