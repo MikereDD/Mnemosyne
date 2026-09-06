@@ -69,7 +69,7 @@ TV           → Series (Start Year - End Year/Continuing)
 - [x] Resume / retry across interrupted batch jobs
 - [x] Durable batch state / recovery
 - [x] Individual retry without blindly rerunning staged work
-- [ ] Detailed CLI help and recovery guidance
+- [x] Detailed CLI help and recovery guidance
 - [ ] CI and fault-injection coverage
 
 ## Phase 3 — Generalize acquisition
