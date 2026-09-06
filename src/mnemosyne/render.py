@@ -23,6 +23,12 @@ from .cleanup import CleanupPreview, CleanupResult
 from .fetcher import FetchResult
 from .ebook_fetcher import EbookFetchResult
 from .ebook_placement import EbookPlacementPreview, EbookPlacementResult
+from .ebook_lifecycle import (
+    EbookCleanupPreview,
+    EbookCleanupResult,
+    EbookCompletionPreview,
+    EbookCompletionResult,
+)
 from .inspection import MetadataInspection, MultiFileInspection
 from .models import AcquisitionPlan, CandidateKind
 from .placement import PlacementPreview, PlacementResult
@@ -683,6 +689,138 @@ def render_ebook_placement_result(result: EbookPlacementResult) -> None:
             "Post-placement SHA-256 verification: PASSED\n"
             "Staged source retained: YES\n"
             "[bold]Library modified: YES[/bold]",
+            border_style="green",
+        )
+    )
+
+
+def render_ebook_completion_preview(preview: EbookCompletionPreview) -> None:
+    table = Table(show_header=False, box=None, pad_edge=False)
+    table.add_column(style="bold")
+    table.add_column()
+    table.add_row("Job", preview.job_id)
+    table.add_row("Final directory", str(preview.destination_dir))
+    table.add_row("Final file", str(preview.final_file))
+    table.add_row("SHA-256", preview.sha256)
+
+    console.print(
+        Panel(
+            table,
+            title="[bold cyan]EBOOK COMPLETION PREVIEW[/bold cyan]",
+            border_style="cyan",
+        )
+    )
+
+    checks = Table(title="Completion checks")
+    checks.add_column("Check")
+    checks.add_column("Result")
+    checks.add_column("Detail")
+    for check in preview.checks:
+        checks.add_row(
+            check.name,
+            "[green]PASS[/green]" if check.passed else "[red]FAIL[/red]",
+            check.detail,
+        )
+    console.print(checks)
+
+    console.print(
+        Panel(
+            (
+                "[bold green]READY TO COMPLETE[/bold green]\n"
+                if preview.ready_to_complete
+                else "[bold red]NOT READY TO COMPLETE[/bold red]\n"
+            )
+            + "Preview only.\n"
+            + "Staging retained: YES\n"
+            + "Library modified by this command: NO",
+            border_style="green" if preview.ready_to_complete else "red",
+        )
+    )
+
+
+def render_ebook_completion_result(result: EbookCompletionResult) -> None:
+    table = Table(show_header=False, box=None, pad_edge=False)
+    table.add_column(style="bold")
+    table.add_column()
+    table.add_row("Job", result.job_id)
+    table.add_row("Final file", str(result.final_file))
+    table.add_row("SHA-256", result.sha256)
+    table.add_row("Completion report", str(result.completion_report_path))
+    table.add_row("Fetch report", str(result.fetch_report_path))
+
+    console.print(
+        Panel(
+            table,
+            title="[bold green]EBOOK LIFECYCLE COMPLETE[/bold green]",
+            border_style="green",
+        )
+    )
+    console.print(
+        Panel(
+            "Final eBook re-verified: YES\n"
+            "Staged source re-verified: YES\n"
+            "Completion provenance written: YES\n"
+            "Staging retained: YES\n"
+            "Cleanup performed: NO",
+            border_style="green",
+        )
+    )
+
+
+def render_ebook_cleanup_preview(preview: EbookCleanupPreview) -> None:
+    table = Table(show_header=False, box=None, pad_edge=False)
+    table.add_column(style="bold")
+    table.add_column()
+    table.add_row("Job", preview.job_id)
+    table.add_row("Staging directory", str(preview.job_dir))
+    table.add_row("Final file", str(preview.final_file))
+    table.add_row("Final SHA-256", preview.final_sha256)
+    table.add_row("Receipt", str(preview.receipt_path))
+    table.add_row("Staging files", str(preview.file_count))
+    table.add_row("Staging size", _size(preview.staging_size_bytes))
+
+    console.print(
+        Panel(
+            table,
+            title="[bold yellow]EBOOK CLEANUP PREVIEW[/bold yellow]",
+            border_style="yellow",
+        )
+    )
+    console.print(
+        Panel(
+            "Destructive staging cleanup has NOT run.\n"
+            "A durable receipt will be written before deletion.\n"
+            f"Apply requires --confirm {preview.job_id}",
+            border_style="yellow",
+        )
+    )
+
+
+def render_ebook_cleanup_result(result: EbookCleanupResult) -> None:
+    table = Table(show_header=False, box=None, pad_edge=False)
+    table.add_column(style="bold")
+    table.add_column()
+    table.add_row("Job", result.job_id)
+    table.add_row("Removed staging", str(result.removed_job_dir))
+    table.add_row("Receipt", str(result.receipt_path))
+    table.add_row("Final file", str(result.final_file))
+    table.add_row("Final SHA-256", result.final_sha256)
+    table.add_row("Removed files", str(result.file_count))
+    table.add_row("Removed size", _size(result.staging_size_bytes))
+
+    console.print(
+        Panel(
+            table,
+            title="[bold green]EBOOK STAGING CLEANUP COMPLETE[/bold green]",
+            border_style="green",
+        )
+    )
+    console.print(
+        Panel(
+            "Durable completion receipt verified: YES\n"
+            "Final eBook re-verified immediately before deletion: YES\n"
+            "Staging removed: YES\n"
+            "Final library retained: YES",
             border_style="green",
         )
     )

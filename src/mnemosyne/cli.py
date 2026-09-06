@@ -24,6 +24,13 @@ from .cleanup import CleanupError, apply_cleanup, preview_cleanup
 from .config import initialize_runtime, load_config, runtime_root
 from .fetcher import FetchError, fetch_plan_to_staging
 from .ebook_fetcher import EbookFetchResult, fetch_ebook_plan_to_staging
+from .ebook_lifecycle import (
+    EbookLifecycleError,
+    apply_ebook_cleanup,
+    apply_ebook_completion,
+    preview_ebook_cleanup,
+    preview_ebook_completion,
+)
 from .ebook_placement import (
     EbookPlacementError,
     apply_ebook_placement,
@@ -81,6 +88,10 @@ from .render import (
     render_ebook_fetch_result,
     render_ebook_placement_preview,
     render_ebook_placement_result,
+    render_ebook_completion_result,
+    render_ebook_completion_preview,
+    render_ebook_cleanup_result,
+    render_ebook_cleanup_preview,
     render_inspection,
     render_multifile_inspection,
     render_plan,
@@ -644,6 +655,101 @@ def ebook_place_command(
         raise typer.Exit(code=27) from exc
 
     render_ebook_placement_result(result)
+
+
+@app.command("ebook-complete")
+def ebook_complete_command(
+    job: Annotated[
+        Path,
+        typer.Argument(help="Placed-and-verified eBook staging job directory."),
+    ],
+    apply: Annotated[
+        bool,
+        typer.Option(
+            "--apply",
+            help="Certify the verified eBook lifecycle complete while retaining staging.",
+        ),
+    ] = False,
+) -> None:
+    """Preview or certify eBook lifecycle completion."""
+    try:
+        preview = preview_ebook_completion(job)
+    except (EbookLifecycleError, OSError) as exc:
+        console.print(
+            f"[bold red]eBook completion blocked:[/bold red] {exc}"
+        )
+        raise typer.Exit(code=28) from exc
+
+    if not apply:
+        render_ebook_completion_preview(preview)
+        if not preview.ready_to_complete:
+            raise typer.Exit(code=29)
+        return
+
+    try:
+        result = apply_ebook_completion(job)
+    except (EbookLifecycleError, OSError) as exc:
+        console.print(
+            f"[bold red]eBook completion failed:[/bold red] {exc}"
+        )
+        raise typer.Exit(code=30) from exc
+
+    render_ebook_completion_result(result)
+
+
+@app.command("ebook-cleanup")
+def ebook_cleanup_command(
+    job: Annotated[
+        Path,
+        typer.Argument(help="Lifecycle-complete eBook staging job directory."),
+    ],
+    apply: Annotated[
+        bool,
+        typer.Option(
+            "--apply",
+            help="Archive a durable eBook completion receipt and remove staging.",
+        ),
+    ] = False,
+    confirm: Annotated[
+        str | None,
+        typer.Option(
+            "--confirm",
+            help="Required with --apply. Must exactly match the eBook job ID.",
+        ),
+    ] = None,
+) -> None:
+    """Preview or safely remove retained eBook staging after completion."""
+    try:
+        preview = preview_ebook_cleanup(job)
+    except (EbookLifecycleError, OSError) as exc:
+        console.print(
+            f"[bold red]eBook cleanup blocked:[/bold red] {exc}"
+        )
+        raise typer.Exit(code=31) from exc
+
+    if not apply:
+        render_ebook_cleanup_preview(preview)
+        return
+
+    if confirm is None:
+        console.print(
+            "[bold red]eBook cleanup blocked:[/bold red] "
+            "--confirm must exactly match the job ID."
+        )
+        raise typer.Exit(code=32)
+
+    try:
+        result = apply_ebook_cleanup(
+            job,
+            confirm_job_id=confirm,
+        )
+    except (EbookLifecycleError, OSError) as exc:
+        console.print(
+            f"[bold red]eBook cleanup failed:[/bold red] {exc}"
+        )
+        raise typer.Exit(code=33) from exc
+
+    render_ebook_cleanup_result(result)
 
 
 @app.command("complete")
