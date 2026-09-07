@@ -41,6 +41,7 @@ from .readiness import ReadinessResult
 from .prune import PrunePreview, PruneResult
 from .tagging import TaggingPreview, TaggingResult
 from .staging_discard import StagingDiscardPreview, StagingDiscardResult
+from .library_scan import LibraryScanResult
 
 console = Console()
 
@@ -68,6 +69,65 @@ def _duration(value: float | None) -> str:
 
 
 
+
+
+def render_library_scan(result: LibraryScanResult) -> None:
+    summary = Table(show_header=False, box=None, pad_edge=False)
+    summary.add_column(style="bold")
+    summary.add_column()
+    summary.add_row("Scan", result.scan_id)
+    summary.add_row("Media", result.media.value)
+    summary.add_row("Library root", str(result.library_root))
+    summary.add_row("Category root", str(result.category_root))
+    summary.add_row("Items", str(result.item_count))
+    summary.add_row("Media files", str(result.file_count))
+    summary.add_row("Total size", _size(result.total_bytes))
+    summary.add_row("Canonical-looking", str(result.canonical_count))
+    summary.add_row("Needs identification", str(result.needs_identification_count))
+    summary.add_row("Possible duplicates", str(result.possible_duplicate_count))
+    summary.add_row("Ignored non-media files", str(result.ignored_non_media_files))
+    summary.add_row("Skipped symlinks", str(result.skipped_symlinks))
+    summary.add_row("Durable report", str(result.report_path))
+    console.print(Panel(summary, title="[bold cyan]EXISTING LIBRARY SCAN[/bold cyan]", border_style="cyan"))
+
+    table = Table(title="eBook structural inventory")
+    table.add_column("#", justify="right")
+    table.add_column("Path")
+    table.add_column("Structure")
+    table.add_column("Probable work")
+    table.add_column("Files", justify="right")
+    table.add_column("Metadata")
+    table.add_column("Canonical")
+    table.add_column("Identify")
+    table.add_column("Duplicate")
+    for index, item in enumerate(result.items, start=1):
+        work = item.probable_title or "?"
+        if item.probable_author:
+            work = f"{item.probable_author} — {work}"
+        if item.probable_series:
+            series = item.probable_series + (f" #{item.series_index}" if item.series_index else "")
+            work += f" [{series}]"
+        table.add_row(
+            str(index), item.relative_path, item.structure, work, str(item.file_count),
+            item.embedded_metadata,
+            "[green]YES[/green]" if item.canonical_looking else "[yellow]NO[/yellow]",
+            "[yellow]YES[/yellow]" if item.needs_identification else "[green]NO[/green]",
+            "[yellow]YES[/yellow]" if item.possible_duplicate else "NO",
+        )
+    console.print(table)
+
+    issues = [f"{item.relative_path}: {issue}" for item in result.items for issue in item.issues]
+    if issues:
+        console.print(Panel("\n".join(f"• {line}" for line in issues), title="Items needing attention", border_style="yellow"))
+
+    console.print(
+        Panel(
+            "Library scan completed: YES\n"
+            "Files renamed: NO\nFiles moved: NO\nMetadata modified: NO\nLibrary modified: NO\n"
+            "Only the durable scan report was written outside the media library.",
+            border_style="green",
+        )
+    )
 
 def render_batch_preview(preview: BatchPreview) -> None:
     console.print(

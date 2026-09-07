@@ -49,6 +49,7 @@ from .inspection import (
     latest_staging_job,
 )
 from .models import MediaType
+from .library_scan import LibraryScanError, LibraryScanMedia, scan_library
 from .multifile_metadata import (
     MultiFileMetadataError,
     apply_multifile_tagging,
@@ -126,6 +127,7 @@ from .render import (
     render_prune_result,
     render_staging_discard_preview,
     render_staging_discard_result,
+    render_library_scan,
 )
 from .tagging import TaggingError, apply_metadata_normalization, preview_metadata_normalization
 from .staging_discard import (
@@ -200,6 +202,30 @@ def init() -> None:
     else:
         console.print("[dim]Runtime structure already exists; nothing changed.[/dim]")
 
+
+
+@app.command("library-scan")
+def library_scan_command(
+    media: Annotated[
+        LibraryScanMedia,
+        typer.Option(
+            "--media",
+            help="Existing-library media family to scan. The first implemented scanner is ebook.",
+        ),
+    ] = LibraryScanMedia.EBOOK,
+) -> None:
+    """Inventory existing media structure without changing the media library."""
+    config = load_config()
+    try:
+        result = scan_library(
+            config.library_root,
+            media=media,
+            ebooks_dir=config.library.ebooks,
+        )
+    except (LibraryScanError, OSError) as exc:
+        console.print(f"[bold red]Library scan failed:[/bold red] {exc}")
+        raise typer.Exit(code=41) from exc
+    render_library_scan(result)
 
 
 @app.command("batch")
