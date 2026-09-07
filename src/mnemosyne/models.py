@@ -44,6 +44,10 @@ class ArchiveItem(BaseModel):
     title: str
     creator: str | None = None
     year: int | None = None
+    series: str | None = None
+    series_index: float | None = None
+    series_provenance: str | None = None
+    series_index_provenance: str | None = None
     external_link: str | None = None
     candidates: list[MediaCandidate] = Field(default_factory=list)
     raw_metadata: dict[str, Any] = Field(default_factory=dict)

@@ -111,6 +111,52 @@ def preview_ebook_placement(
     title = str(work.get("title") or "").strip()
     creator = str(work.get("creator") or "").strip()
     year_value = work.get("year")
+    series_value = work.get("series")
+    series_index_value = work.get("seriesIndex")
+    series_provenance = str(
+        work.get("seriesProvenance") or ""
+    ).strip()
+    series_index_provenance = str(
+        work.get("seriesIndexProvenance") or ""
+    ).strip()
+
+    series = (
+        str(series_value).strip()
+        if series_value is not None
+        else None
+    )
+    if series == "":
+        series = None
+
+    if series is not None and series_provenance != "verified-override":
+        raise EbookPlacementError(
+            "eBook series hierarchy is not backed by verified provenance."
+        )
+
+    try:
+        series_index = (
+            float(series_index_value)
+            if series_index_value is not None
+            else None
+        )
+    except (TypeError, ValueError) as exc:
+        raise EbookPlacementError(
+            f"Invalid series index in provenance: {series_index_value!r}"
+        ) from exc
+
+    if series_index is not None:
+        if series is None:
+            raise EbookPlacementError(
+                "Series index exists without a verified series name."
+            )
+        if series_index_provenance != "verified-override":
+            raise EbookPlacementError(
+                "eBook series index is not backed by verified provenance."
+            )
+        if series_index < 0:
+            raise EbookPlacementError(
+                "eBook series index must not be negative."
+            )
 
     if not title:
         raise EbookPlacementError("Verified eBook title is missing from provenance.")
@@ -170,6 +216,8 @@ def preview_ebook_placement(
         creator,
         title,
         year,
+        series=series,
+        series_index=series_index,
     ).resolve()
 
     canonical_filename = f"{sanitize_component(title)}{extension}"

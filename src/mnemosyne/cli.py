@@ -151,6 +151,8 @@ def _build_plan(
     year: int | None,
     title: str | None,
     creator: str | None,
+    series: str | None,
+    series_index: float | None,
     audio_format: str | None,
     ebook_format: str | None,
 ):
@@ -164,6 +166,8 @@ def _build_plan(
             title_override=title,
             creator_override=creator,
             year_override=year,
+            series_override=series,
+            series_index_override=series_index,
         )
     except ProviderError as exc:
         console.print(f"[bold red]Provider error:[/bold red] {exc}")
@@ -355,6 +359,8 @@ def plan(
     year: Annotated[int | None, typer.Option("--year", help="Verified publication/release year override.")] = None,
     title: Annotated[str | None, typer.Option("--title", help="Verified title override.")] = None,
     creator: Annotated[str | None, typer.Option("--creator", help="Verified author/artist override.")] = None,
+    series: Annotated[str | None, typer.Option("--series", help="Verified eBook series name override.")] = None,
+    series_index: Annotated[float | None, typer.Option("--series-index", help="Verified eBook series ordering index; requires --series.")] = None,
     audio_format: Annotated[str | None, typer.Option("--audio-format", help="Prefer a complete audio edition by extension, e.g. mp3, m4b, flac.")] = None,
     ebook_format: Annotated[str | None, typer.Option("--ebook-format", help="Prefer an eBook edition by extension, e.g. epub, azw3, mobi, pdf. Preview only.")] = None,
 ) -> None:
@@ -365,6 +371,8 @@ def plan(
         year=year,
         title=title,
         creator=creator,
+        series=series,
+        series_index=series_index,
         audio_format=audio_format,
         ebook_format=ebook_format,
     )
@@ -379,6 +387,8 @@ def fetch(
     year: Annotated[int | None, typer.Option("--year", help="Verified publication/release year override.")] = None,
     title: Annotated[str | None, typer.Option("--title", help="Verified title override.")] = None,
     creator: Annotated[str | None, typer.Option("--creator", help="Verified author/artist override.")] = None,
+    series: Annotated[str | None, typer.Option("--series", help="Verified eBook series name override.")] = None,
+    series_index: Annotated[float | None, typer.Option("--series-index", help="Verified eBook series ordering index; requires --series.")] = None,
     audio_format: Annotated[str | None, typer.Option("--audio-format", help="Prefer a complete audio edition by extension, e.g. mp3, m4b, flac.")] = None,
     ebook_format: Annotated[str | None, typer.Option("--ebook-format", help="Prefer an eBook edition by extension, e.g. epub, azw3, mobi, pdf.")] = None,
 ) -> None:
@@ -389,6 +399,8 @@ def fetch(
         year=year,
         title=title,
         creator=creator,
+        series=series,
+        series_index=series_index,
         audio_format=audio_format,
         ebook_format=ebook_format,
     )

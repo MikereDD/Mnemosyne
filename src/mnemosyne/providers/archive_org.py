@@ -95,9 +95,22 @@ class ArchiveOrgProvider(Provider):
         title_override: str | None = None,
         creator_override: str | None = None,
         year_override: int | None = None,
+        series_override: str | None = None,
+        series_index_override: float | None = None,
     ) -> ArchiveItem:
         if not self.can_handle(url):
             raise ProviderError("This URL is not a supported Archive.org details URL.")
+
+        if series_index_override is not None and series_override is None:
+            raise ProviderError(
+                "Verified series index requires a verified series name."
+            )
+        if series_index_override is not None and series_index_override < 0:
+            raise ProviderError("Verified series index must not be negative.")
+        if series_override is not None:
+            series_override = series_override.strip()
+            if not series_override:
+                raise ProviderError("Verified series name must not be blank.")
 
         identifier = self.identifier_from_url(url)
         metadata_url = f"https://archive.org/metadata/{quote(identifier, safe='')}"
@@ -135,6 +148,16 @@ class ArchiveOrgProvider(Provider):
             title=cleaned_title,
             creator=creator,
             year=year,
+            series=series_override,
+            series_index=series_index_override,
+            series_provenance=(
+                "verified-override" if series_override is not None else None
+            ),
+            series_index_provenance=(
+                "verified-override"
+                if series_index_override is not None
+                else None
+            ),
             external_link=external_link,
             candidates=candidates,
             raw_metadata=metadata,

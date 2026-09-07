@@ -27,6 +27,9 @@ def canonical_destination(
     creator: str,
     title: str,
     year: int | None,
+    *,
+    series: str | None = None,
+    series_index: float | None = None,
 ) -> Path:
     creator_part = sanitize_component(creator)
     title_part = sanitize_component(title)
@@ -42,12 +45,30 @@ def canonical_destination(
         )
 
     if media_type is MediaType.EBOOK:
-        return (
-            library_root
-            / "eBooks"
-            / creator_part
-            / title_part
-        )
+        if series_index is not None and series is None:
+            raise ValueError(
+                "eBook series index requires a verified series name."
+            )
+
+        ebook_root = library_root / "eBooks" / creator_part
+        if series is None:
+            return ebook_root / title_part
+
+        series_part = sanitize_component(series)
+        if series_index is None:
+            book_part = title_part
+        else:
+            if series_index < 0:
+                raise ValueError("eBook series index must not be negative.")
+            index_text = f"{series_index:g}"
+            if "." in index_text:
+                whole, fraction = index_text.split(".", 1)
+                index_part = f"{whole.zfill(2)}.{fraction}"
+            else:
+                index_part = index_text.zfill(2)
+            book_part = f"{index_part} - {title_part}"
+
+        return ebook_root / series_part / book_part
 
     return (
         library_root

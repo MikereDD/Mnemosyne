@@ -178,6 +178,10 @@ def fetch_ebook_plan_to_staging(
                 "title": plan.item.title,
                 "creator": plan.item.creator,
                 "year": plan.item.year,
+                "series": plan.item.series,
+                "seriesIndex": plan.item.series_index,
+                "seriesProvenance": plan.item.series_provenance,
+                "seriesIndexProvenance": plan.item.series_index_provenance,
             },
             "selection": {
                 "editionKey": plan.selected_ebook_edition_key,

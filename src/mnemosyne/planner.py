@@ -71,12 +71,39 @@ def build_plan(
     if not selected_cover:
         warnings.append("No cover candidate was found in the Archive item.")
 
+    verified_series = None
+    verified_series_index = None
+
+    if item.media_type is MediaType.EBOOK:
+        if item.series is not None:
+            if item.series_provenance == "verified-override":
+                verified_series = item.series
+            else:
+                warnings.append(
+                    "Series metadata exists but is not verified; "
+                    "filesystem series hierarchy will not be created."
+                )
+
+        if item.series_index is not None:
+            if (
+                item.series_index_provenance == "verified-override"
+                and verified_series is not None
+            ):
+                verified_series_index = item.series_index
+            else:
+                warnings.append(
+                    "Series index exists without verified series provenance; "
+                    "filesystem ordering will not be applied."
+                )
+
     destination = canonical_destination(
         library_root=library_root,
         media_type=item.media_type,
         creator=creator,
         title=item.title,
         year=item.year,
+        series=verified_series,
+        series_index=verified_series_index,
     )
 
     return AcquisitionPlan(

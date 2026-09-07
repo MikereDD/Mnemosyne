@@ -521,6 +521,23 @@ def render_plan(plan: AcquisitionPlan) -> None:
     summary.add_row("Title", item.title)
     summary.add_row("Creator", item.creator or "[yellow]Unknown[/yellow]")
     summary.add_row("Year", str(item.year) if item.year else "[yellow]Unknown[/yellow]")
+    if item.media_type.value == "ebook":
+        summary.add_row(
+            "Series",
+            (
+                f"{item.series} [dim]({item.series_provenance})[/dim]"
+                if item.series
+                else "—"
+            ),
+        )
+        summary.add_row(
+            "Series index",
+            (
+                f"{item.series_index:g} [dim]({item.series_index_provenance})[/dim]"
+                if item.series_index is not None
+                else "—"
+            ),
+        )
     summary.add_row("Destination", str(plan.destination))
     console.print(summary)
 
