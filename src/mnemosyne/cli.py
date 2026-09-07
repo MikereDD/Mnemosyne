@@ -50,6 +50,7 @@ from .inspection import (
 )
 from .models import MediaType
 from .library_scan import LibraryScanError, LibraryScanMedia, scan_library
+from .library_identify import LibraryIdentifyError, identify_library
 from .multifile_metadata import (
     MultiFileMetadataError,
     apply_multifile_tagging,
@@ -128,6 +129,7 @@ from .render import (
     render_staging_discard_preview,
     render_staging_discard_result,
     render_library_scan,
+    render_library_identification,
 )
 from .tagging import TaggingError, apply_metadata_normalization, preview_metadata_normalization
 from .staging_discard import (
@@ -226,6 +228,42 @@ def library_scan_command(
         console.print(f"[bold red]Library scan failed:[/bold red] {exc}")
         raise typer.Exit(code=41) from exc
     render_library_scan(result)
+
+
+@app.command("library-identify")
+def library_identify_command(
+    media: Annotated[
+        LibraryScanMedia,
+        typer.Option(
+            "--media",
+            help="Existing-library media family to identify. The first implemented identifier is ebook.",
+        ),
+    ] = LibraryScanMedia.EBOOK,
+    scan_report: Annotated[
+        Path | None,
+        typer.Option(
+            "--scan-report",
+            help=(
+                "Use a specific durable scan report from $HOME/Mnemosyne/state/scans. "
+                "Omit to use the latest eBook scan."
+            ),
+        ),
+    ] = None,
+) -> None:
+    """Build a read-only evidence/confidence identity plan from a durable library scan."""
+    config = load_config()
+    try:
+        result = identify_library(
+            config.library_root,
+            media=media,
+            ebooks_dir=config.library.ebooks,
+            scan_report=scan_report,
+        )
+    except (LibraryIdentifyError, OSError) as exc:
+        console.print(f"[bold red]Library identification failed:[/bold red] {exc}")
+        raise typer.Exit(code=42) from exc
+
+    render_library_identification(result)
 
 
 @app.command("batch")

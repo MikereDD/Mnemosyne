@@ -42,6 +42,10 @@ from .prune import PrunePreview, PruneResult
 from .tagging import TaggingPreview, TaggingResult
 from .staging_discard import StagingDiscardPreview, StagingDiscardResult
 from .library_scan import LibraryScanResult
+from .library_identify import (
+    LibraryConfidence,
+    LibraryIdentificationResult,
+)
 
 console = Console()
 
@@ -125,6 +129,131 @@ def render_library_scan(result: LibraryScanResult) -> None:
             "Library scan completed: YES\n"
             "Files renamed: NO\nFiles moved: NO\nMetadata modified: NO\nLibrary modified: NO\n"
             "Only the durable scan report was written outside the media library.",
+            border_style="green",
+        )
+    )
+
+
+def render_library_identification(result: LibraryIdentificationResult) -> None:
+    summary = Table(show_header=False, box=None, pad_edge=False)
+    summary.add_column(style="bold")
+    summary.add_column()
+    summary.add_row("Identification", result.identification_id)
+    summary.add_row("Source scan", result.source_scan_id)
+    summary.add_row("Media", result.media.value)
+    summary.add_row("Items", str(result.item_count))
+    summary.add_row("High confidence", str(result.high_confidence_count))
+    summary.add_row("Keep", str(result.keep_count))
+    summary.add_row("Would move", str(result.would_move_count))
+    summary.add_row("Review required", str(result.review_count))
+    summary.add_row("Durable report", str(result.report_path))
+    console.print(
+        Panel(
+            summary,
+            title="[bold cyan]EXISTING LIBRARY IDENTIFICATION[/bold cyan]",
+            border_style="cyan",
+        )
+    )
+
+    table = Table(title="eBook identity plan")
+    table.add_column("#", justify="right")
+    table.add_column("Current")
+    table.add_column("Proposed identity")
+    table.add_column("Series")
+    table.add_column("Confidence")
+    table.add_column("Action")
+    table.add_column("External")
+    for index, item in enumerate(result.items, start=1):
+        identity = " — ".join(
+            value for value in (item.author, item.title) if value
+        ) or "?"
+        series = item.series or "-"
+        if item.series and item.series_index:
+            series = f"{item.series} #{item.series_index}"
+        confidence_style = {
+            "VERIFIED": "green",
+            "HIGH": "green",
+            "MEDIUM": "yellow",
+            "LOW": "yellow",
+            "CONFLICT": "red",
+            "UNRESOLVED": "red",
+        }[item.confidence.value]
+        table.add_row(
+            str(index),
+            item.current_path,
+            identity,
+            series,
+            f"[{confidence_style}]{item.confidence.value}[/{confidence_style}]",
+            item.action,
+            item.external_lookup,
+        )
+    console.print(table)
+
+    evidence_table = Table(title="Evidence used")
+    evidence_table.add_column("#", justify="right")
+    evidence_table.add_column("Structure")
+    evidence_table.add_column("Embedded")
+    evidence_table.add_column("Filename")
+    evidence_table.add_column("Proposed path")
+    for index, item in enumerate(result.items, start=1):
+        ev = item.evidence
+
+        def pair(author: str | None, title: str | None) -> str:
+            if author and title:
+                return f"{author} — {title}"
+            return author or title or "-"
+
+        structure = pair(ev.structure_author, ev.structure_title)
+        if ev.structure_series:
+            structure += f" [{ev.structure_series}"
+            if ev.structure_series_index:
+                structure += f" #{ev.structure_series_index}"
+            structure += "]"
+
+        embedded = pair(ev.embedded_author, ev.embedded_title)
+        if ev.embedded_series:
+            embedded += f" [{ev.embedded_series}"
+            if ev.embedded_series_index:
+                embedded += f" #{ev.embedded_series_index}"
+            embedded += "]"
+
+        filename = pair(ev.filename_author, ev.filename_title)
+        if ev.filename_year:
+            filename += f" ({ev.filename_year})"
+
+        evidence_table.add_row(
+            str(index),
+            structure,
+            embedded,
+            filename,
+            item.proposed_path or "[red]<not proposed>[/red]",
+        )
+    console.print(evidence_table)
+
+    attention = [
+        f"{item.current_path}: {reason}"
+        for item in result.items
+        if item.review_required or item.confidence in {LibraryConfidence.CONFLICT, LibraryConfidence.UNRESOLVED}
+        for reason in item.reasons
+    ]
+    if attention:
+        console.print(
+            Panel(
+                "\n".join(f"• {line}" for line in attention),
+                title="[bold yellow]Identification review[/bold yellow]",
+                border_style="yellow",
+            )
+        )
+
+    console.print(
+        Panel(
+            "Identity planning completed: YES\n"
+            "External lookup performed: NO\n"
+            "Files renamed: NO\n"
+            "Files moved: NO\n"
+            "Metadata modified: NO\n"
+            "Library modified: NO\n"
+            "Only VERIFIED/HIGH identities are eligible for future automatic planning.",
             border_style="green",
         )
     )
