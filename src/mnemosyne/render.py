@@ -46,6 +46,7 @@ from .library_identify import (
     LibraryConfidence,
     LibraryIdentificationResult,
 )
+from .library_plan import LibraryPlanResult
 
 console = Console()
 
@@ -254,6 +255,106 @@ def render_library_identification(result: LibraryIdentificationResult) -> None:
             "Metadata modified: NO\n"
             "Library modified: NO\n"
             "Only VERIFIED/HIGH identities are eligible for future automatic planning.",
+            border_style="green",
+        )
+    )
+
+
+def render_library_plan(result: LibraryPlanResult) -> None:
+    summary = Table(show_header=False, box=None, pad_edge=False)
+    summary.add_column(style="bold")
+    summary.add_column()
+    summary.add_row("Plan", result.plan_id)
+    summary.add_row("Identification", result.source_identification_id)
+    summary.add_row("Source scan", result.source_scan_id)
+    summary.add_row("Media", result.media.value)
+    summary.add_row("Items", str(result.item_count))
+    summary.add_row("Keep", str(result.keep_count))
+    summary.add_row("Ready", str(result.move_count))
+    summary.add_row("Blocked", str(result.blocked_count))
+    summary.add_row("Representations", str(result.representation_count))
+    summary.add_row("Durable report", str(result.report_path))
+    console.print(
+        Panel(
+            summary,
+            title="[bold cyan]EXISTING LIBRARY FILESYSTEM PLAN[/bold cyan]",
+            border_style="cyan",
+        )
+    )
+
+    table = Table(title="eBook filesystem plan")
+    table.add_column("#", justify="right")
+    table.add_column("Current")
+    table.add_column("Target")
+    table.add_column("Confidence")
+    table.add_column("Status")
+    table.add_column("Directory")
+    table.add_column("Files", justify="right")
+    table.add_column("Collision")
+    for index, item in enumerate(result.items, start=1):
+        status_style = {
+            "KEEP": "green",
+            "READY": "cyan",
+            "BLOCKED": "red",
+        }[item.status]
+        table.add_row(
+            str(index),
+            item.current_path,
+            item.target_path or "[red]<none>[/red]",
+            item.confidence.value,
+            f"[{status_style}]{item.status}[/{status_style}]",
+            item.directory_action,
+            str(len(item.representations)),
+            "[red]YES[/red]" if item.destination_exists else "NO",
+        )
+    console.print(table)
+
+    operations = Table(title="Representation operations")
+    operations.add_column("#", justify="right")
+    operations.add_column("Action")
+    operations.add_column("Source")
+    operations.add_column("Destination")
+    operations.add_column("Size")
+    operations.add_column("SHA-256")
+    row = 0
+    for item in result.items:
+        for representation in item.representations:
+            row += 1
+            operations.add_row(
+                str(row),
+                representation.action,
+                representation.source,
+                representation.destination or "-",
+                _size(representation.size_bytes),
+                representation.sha256[:16] + "…",
+            )
+    if row:
+        console.print(operations)
+
+    blocked = [
+        f"{item.current_path}: {reason}"
+        for item in result.items
+        for reason in item.blocked_reasons
+    ]
+    if blocked:
+        console.print(
+            Panel(
+                "\n".join(f"• {line}" for line in blocked),
+                title="[bold red]Blocked filesystem plans[/bold red]",
+                border_style="red",
+            )
+        )
+
+    console.print(
+        Panel(
+            "Filesystem planning completed: YES\n"
+            "Source SHA-256 snapshots recorded: YES\n"
+            "Directories created: NO\n"
+            "Files renamed: NO\n"
+            "Files moved: NO\n"
+            "Files overwritten: NO\n"
+            "Metadata modified: NO\n"
+            "Library modified: NO",
             border_style="green",
         )
     )

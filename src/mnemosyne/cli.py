@@ -51,6 +51,7 @@ from .inspection import (
 from .models import MediaType
 from .library_scan import LibraryScanError, LibraryScanMedia, scan_library
 from .library_identify import LibraryIdentifyError, identify_library
+from .library_plan import LibraryPlanError, plan_library
 from .multifile_metadata import (
     MultiFileMetadataError,
     apply_multifile_tagging,
@@ -130,6 +131,7 @@ from .render import (
     render_staging_discard_result,
     render_library_scan,
     render_library_identification,
+    render_library_plan,
 )
 from .tagging import TaggingError, apply_metadata_normalization, preview_metadata_normalization
 from .staging_discard import (
@@ -264,6 +266,43 @@ def library_identify_command(
         raise typer.Exit(code=42) from exc
 
     render_library_identification(result)
+
+
+@app.command("library-plan")
+def library_plan_command(
+    media: Annotated[
+        LibraryScanMedia,
+        typer.Option(
+            "--media",
+            help="Existing-library media family to plan. The first implemented planner is ebook.",
+        ),
+    ] = LibraryScanMedia.EBOOK,
+    identification_report: Annotated[
+        Path | None,
+        typer.Option(
+            "--identification-report",
+            help=(
+                "Use a specific durable identification report from "
+                "$HOME/Mnemosyne/state/identifications. "
+                "Omit to use the latest eBook identification."
+            ),
+        ),
+    ] = None,
+) -> None:
+    """Build an exact read-only filesystem plan for an identified existing library."""
+    config = load_config()
+    try:
+        result = plan_library(
+            config.library_root,
+            media=media,
+            ebooks_dir=config.library.ebooks,
+            identification_report=identification_report,
+        )
+    except (LibraryPlanError, OSError) as exc:
+        console.print(f"[bold red]Library planning failed:[/bold red] {exc}")
+        raise typer.Exit(code=43) from exc
+
+    render_library_plan(result)
 
 
 @app.command("batch")
