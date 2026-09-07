@@ -24,6 +24,12 @@ from .cleanup import CleanupError, apply_cleanup, preview_cleanup
 from .config import initialize_runtime, load_config, runtime_root
 from .fetcher import FetchError, fetch_plan_to_staging
 from .ebook_fetcher import EbookFetchResult, fetch_ebook_plan_to_staging
+from .ebook_metadata import EbookMetadataError, inspect_ebook_metadata
+from .ebook_normalization import (
+    EbookNormalizationError,
+    apply_ebook_normalization,
+    preview_ebook_normalization,
+)
 from .ebook_lifecycle import (
     EbookLifecycleError,
     apply_ebook_cleanup,
@@ -86,6 +92,9 @@ from .render import (
     render_comparison,
     render_fetch_result,
     render_ebook_fetch_result,
+    render_ebook_metadata_inspection,
+    render_ebook_normalization_preview,
+    render_ebook_normalization_result,
     render_ebook_placement_preview,
     render_ebook_placement_result,
     render_ebook_completion_result,
@@ -616,6 +625,84 @@ def place_command(
     else:
         render_placement_result(result)
 
+
+
+@app.command("ebook-inspect")
+def ebook_inspect_command(
+    source: Annotated[
+        Path,
+        typer.Argument(
+            help=(
+                "EPUB file or eBook staging job directory. "
+                "Staging jobs are compared against verified provenance."
+            )
+        ),
+    ],
+) -> None:
+    """Inspect embedded EPUB metadata without modifying the file."""
+    try:
+        result = inspect_ebook_metadata(source)
+    except (EbookMetadataError, OSError) as exc:
+        console.print(
+            f"[bold red]eBook metadata inspection failed:[/bold red] {exc}"
+        )
+        raise typer.Exit(code=34) from exc
+
+    render_ebook_metadata_inspection(result)
+
+
+@app.command("ebook-normalize")
+def ebook_normalize_command(
+    source: Annotated[
+        Path,
+        typer.Argument(
+            help=(
+                "EPUB file or eBook staging job directory. "
+                "Mutation is allowed only for isolated staging jobs."
+            )
+        ),
+    ],
+    apply: Annotated[
+        bool,
+        typer.Option(
+            "--apply",
+            help=(
+                "Transactionally add approved missing metadata in staging, "
+                "then re-validate and update provenance."
+            ),
+        ),
+    ] = False,
+) -> None:
+    """Preview or safely apply EPUB metadata enrichment in staging."""
+    try:
+        preview = preview_ebook_normalization(source)
+    except (EbookNormalizationError, OSError) as exc:
+        console.print(
+            f"[bold red]eBook normalization preview failed:[/bold red] {exc}"
+        )
+        raise typer.Exit(code=35) from exc
+
+    if not apply:
+        render_ebook_normalization_preview(preview)
+        return
+
+    if preview.blocked:
+        render_ebook_normalization_preview(preview)
+        console.print(
+            "[bold red]eBook normalization blocked:[/bold red] "
+            "resolve metadata conflicts before --apply."
+        )
+        raise typer.Exit(code=36)
+
+    try:
+        result = apply_ebook_normalization(source)
+    except (EbookNormalizationError, OSError) as exc:
+        console.print(
+            f"[bold red]eBook normalization failed:[/bold red] {exc}"
+        )
+        raise typer.Exit(code=37) from exc
+
+    render_ebook_normalization_result(result)
 
 
 @app.command("ebook-place")

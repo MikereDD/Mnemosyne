@@ -22,6 +22,11 @@ from .completion import CompletionPreview, CompletionResult
 from .cleanup import CleanupPreview, CleanupResult
 from .fetcher import FetchResult
 from .ebook_fetcher import EbookFetchResult
+from .ebook_metadata import EbookMetadataInspection
+from .ebook_normalization import (
+    EbookNormalizationPreview,
+    EbookNormalizationResult,
+)
 from .ebook_placement import EbookPlacementPreview, EbookPlacementResult
 from .ebook_lifecycle import (
     EbookCleanupPreview,
@@ -627,6 +632,195 @@ def render_plan(plan: AcquisitionPlan) -> None:
 
 
 
+
+def render_ebook_metadata_inspection(result: EbookMetadataInspection) -> None:
+    summary = Table(show_header=False, box=None, pad_edge=False)
+    summary.add_column(style="bold")
+    summary.add_column()
+    summary.add_row("Source", str(result.source_path))
+    summary.add_row("Source kind", result.source_kind)
+    summary.add_row("Package", result.package_path)
+    summary.add_row("EPUB version", result.epub_version or "?")
+    summary.add_row("Title", result.title or "missing")
+    summary.add_row(
+        "Creator(s)",
+        "; ".join(result.creators) if result.creators else "missing",
+    )
+    summary.add_row("Language", result.language or "missing")
+    summary.add_row("Publisher", result.publisher or "missing")
+    summary.add_row(
+        "Date(s)",
+        "; ".join(result.dates) if result.dates else "missing",
+    )
+    summary.add_row(
+        "Identifier(s)",
+        "; ".join(result.identifiers) if result.identifiers else "missing",
+    )
+    summary.add_row(
+        "Subject(s)",
+        "; ".join(result.subjects) if result.subjects else "missing",
+    )
+    summary.add_row("Series", result.series_name or "not declared")
+    summary.add_row("Series index", result.series_index or "not declared")
+    summary.add_row("Cover reference", result.cover_reference or "not declared")
+
+    console.print(
+        Panel(
+            summary,
+            title="[bold cyan]EBOOK METADATA INSPECTION[/bold cyan]",
+            border_style="cyan",
+        )
+    )
+
+    if result.comparisons:
+        comparison_table = Table(title="Embedded metadata vs provenance")
+        comparison_table.add_column("Field")
+        comparison_table.add_column("Embedded")
+        comparison_table.add_column("Provenance")
+        comparison_table.add_column("Status")
+        comparison_table.add_column("Meaning")
+
+        for comparison in result.comparisons:
+            style = {
+                "match": "green",
+                "conflict": "red",
+                "evidence-only": "yellow",
+                "missing-embedded": "yellow",
+                "unverified": "yellow",
+            }.get(comparison.status, "")
+            status = (
+                f"[{style}]{comparison.status.upper()}[/{style}]"
+                if style
+                else comparison.status.upper()
+            )
+            comparison_table.add_row(
+                comparison.field,
+                comparison.embedded or "missing",
+                comparison.provenance or "missing",
+                status,
+                comparison.note,
+            )
+
+        console.print(comparison_table)
+
+    conflicts = [
+        comparison
+        for comparison in result.comparisons
+        if comparison.status == "conflict"
+    ]
+
+    console.print(
+        Panel(
+            "Read-only inspection: YES\n"
+            "eBook bytes modified: NO\n"
+            "Filesystem placement modified: NO\n"
+            f"Hard metadata conflicts detected: {'YES' if conflicts else 'NO'}\n"
+            "Embedded metadata is evidence, not automatic truth.",
+            border_style="red" if conflicts else "green",
+        )
+    )
+
+
+def render_ebook_normalization_preview(
+    preview: EbookNormalizationPreview,
+) -> None:
+    summary = Table(show_header=False, box=None, pad_edge=False)
+    summary.add_column(style="bold")
+    summary.add_column()
+    summary.add_row("Source", str(preview.source_path))
+    summary.add_row("Source kind", preview.source_kind)
+    summary.add_row("Additions", str(preview.additions))
+    summary.add_row("Preserved", str(preview.preserved))
+    summary.add_row("Conflicts", str(preview.conflicts))
+    summary.add_row(
+        "Automatic mutation blocked",
+        "YES" if preview.blocked else "NO",
+    )
+
+    console.print(
+        Panel(
+            summary,
+            title="[bold cyan]EBOOK METADATA NORMALIZATION PREVIEW[/bold cyan]",
+            border_style="red" if preview.blocked else "cyan",
+        )
+    )
+
+    table = Table(title="Normalization plan")
+    table.add_column("Field")
+    table.add_column("Action")
+    table.add_column("Current")
+    table.add_column("Proposed")
+    table.add_column("Reason")
+
+    for action in preview.actions:
+        style = {
+            "add": "green",
+            "preserve": "cyan",
+            "conflict": "red",
+        }.get(action.status, "")
+        rendered_status = (
+            f"[{style}]{action.status.upper()}[/{style}]"
+            if style
+            else action.status.upper()
+        )
+        table.add_row(
+            action.field,
+            rendered_status,
+            action.current_value or "missing",
+            action.proposed_value or "—",
+            action.reason,
+        )
+
+    console.print(table)
+
+    console.print(
+        Panel(
+            "Preview only: YES\n"
+            "eBook bytes modified: NO\n"
+            "Filesystem placement modified: NO\n"
+            "Missing verified fields may be proposed for enrichment.\n"
+            "Conflicting fields are never overwritten silently.",
+            border_style="red" if preview.blocked else "green",
+        )
+    )
+
+
+def render_ebook_normalization_result(
+    result: EbookNormalizationResult,
+) -> None:
+    summary = Table(show_header=False, box=None, pad_edge=False)
+    summary.add_column(style="bold")
+    summary.add_column()
+    summary.add_row("Transaction", result.transaction_id)
+    summary.add_row("Staged eBook", str(result.source_path))
+    summary.add_row("Package", result.package_path)
+    summary.add_row("Added fields", ", ".join(result.additions))
+    summary.add_row("Original SHA-256", result.original_sha256)
+    summary.add_row("Normalized SHA-256", result.normalized_sha256)
+    summary.add_row("Original size", _size(result.original_size))
+    summary.add_row("Normalized size", _size(result.normalized_size))
+    summary.add_row("Normalization report", str(result.normalization_report_path))
+    summary.add_row("Fetch report", str(result.fetch_report_path))
+    console.print(
+        Panel(
+            summary,
+            title="[bold green]EBOOK METADATA NORMALIZED + VERIFIED[/bold green]",
+            border_style="green",
+        )
+    )
+    console.print(
+        Panel(
+            "Transactional rewrite completed: YES\n"
+            "EPUB container re-validated: YES\n"
+            "Added metadata re-inspected: YES\n"
+            "Post-commit SHA-256 verified: YES\n"
+            "Fetch provenance updated: YES\n"
+            "Publication date modified: NO\n"
+            "Series metadata modified: NO\n"
+            "Final library modified: NO",
+            border_style="green",
+        )
+    )
 def render_ebook_placement_preview(preview: EbookPlacementPreview) -> None:
     summary = Table(show_header=False, box=None, pad_edge=False)
     summary.add_column(style="bold")
