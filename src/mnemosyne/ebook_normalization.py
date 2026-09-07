@@ -1,4 +1,5 @@
 from __future__ import annotations
+from decimal import Decimal, InvalidOperation
 
 import hashlib
 import json
@@ -152,9 +153,25 @@ def preview_ebook_normalization(path: Path) -> EbookNormalizationPreview:
         fallback_proposed=inspection.provenance_creator,
     )
 
+    series_action = _action_from_comparison(
+        _comparison_by_field(inspection, "series"),
+        field="series",
+        fallback_current=inspection.series_name,
+        fallback_proposed=inspection.provenance_series,
+    )
+
+    series_index_action = _action_from_comparison(
+        _comparison_by_field(inspection, "series-index"),
+        field="series-index",
+        fallback_current=inspection.series_index,
+        fallback_proposed=inspection.provenance_series_index,
+    )
+
     actions: list[EbookNormalizationAction] = [
         title_action,
         creator_action,
+        series_action,
+        series_index_action,
         EbookNormalizationAction(
             field="publication-date",
             status="preserve",
@@ -190,15 +207,6 @@ def preview_ebook_normalization(path: Path) -> EbookNormalizationPreview:
             ),
             proposed_value=None,
             reason="Subjects remain descriptive metadata and are not filesystem authority.",
-        ),
-        EbookNormalizationAction(
-            field="series",
-            status="preserve",
-            current_value=inspection.series_name,
-            proposed_value=None,
-            reason=(
-                "Series metadata is never inferred or added without separate verified series provenance."
-            ),
         ),
     ]
 
@@ -268,6 +276,66 @@ def _package_path(epub: Path) -> str:
     )
 
 
+def _local_name(tag: str) -> str:
+    return tag.rsplit("}", 1)[-1]
+
+
+def _epub_major_version(root: ET.Element) -> int:
+    raw = str(root.attrib.get("version") or "").strip()
+    try:
+        return int(raw.split(".", 1)[0])
+    except (TypeError, ValueError):
+        return 2
+
+
+def _unique_meta_id(metadata: ET.Element, base: str) -> str:
+    existing = {
+        str(element.attrib.get("id") or "")
+        for element in metadata.iter()
+    }
+    if base not in existing:
+        return base
+
+    index = 2
+    while f"{base}-{index}" in existing:
+        index += 1
+    return f"{base}-{index}"
+
+
+def _existing_series_style(
+    metadata: ET.Element,
+) -> tuple[str | None, ET.Element | None]:
+    for element in metadata.iter():
+        if _local_name(element.tag) != "meta":
+            continue
+        name = str(element.attrib.get("name") or "").strip().casefold()
+        if name == "calibre:series":
+            return "calibre", element
+
+    for element in metadata.iter():
+        if _local_name(element.tag) != "meta":
+            continue
+        if str(element.attrib.get("property") or "").strip() != "belongs-to-collection":
+            continue
+
+        element_id = str(element.attrib.get("id") or "").strip()
+        if not element_id:
+            continue
+
+        ref = f"#{element_id}"
+        for refinement in metadata.iter():
+            if _local_name(refinement.tag) != "meta":
+                continue
+            if str(refinement.attrib.get("refines") or "").strip() != ref:
+                continue
+            if str(refinement.attrib.get("property") or "").strip() != "collection-type":
+                continue
+            if (refinement.text or "").strip().casefold() == "series":
+                return "epub3", element
+
+    return None, None
+
+
 def _rewrite_package(package_bytes: bytes, additions: dict[str, str]) -> bytes:
     try:
         root = ET.fromstring(package_bytes)
@@ -277,7 +345,7 @@ def _rewrite_package(package_bytes: bytes, additions: dict[str, str]) -> bytes:
         ) from exc
 
     metadata = next(
-        (child for child in root if child.tag.rsplit("}", 1)[-1] == "metadata"),
+        (child for child in root if _local_name(child.tag) == "metadata"),
         None,
     )
     if metadata is None:
@@ -286,16 +354,82 @@ def _rewrite_package(package_bytes: bytes, additions: dict[str, str]) -> bytes:
         )
 
     dc = "http://purl.org/dc/elements/1.1/"
+    opf = "http://www.idpf.org/2007/opf"
+
     if "title" in additions:
         node = ET.Element(f"{{{dc}}}title")
         node.text = additions["title"]
         metadata.append(node)
+
     if "creator" in additions:
         node = ET.Element(f"{{{dc}}}creator")
         node.text = additions["creator"]
         metadata.append(node)
 
-    ET.register_namespace("", "http://www.idpf.org/2007/opf")
+    series_name = additions.get("series")
+    series_index = additions.get("series-index")
+
+    if series_name is not None or series_index is not None:
+        style, existing_series = _existing_series_style(metadata)
+        major = _epub_major_version(root)
+
+        if series_name is not None:
+            if major >= 3:
+                series_id = _unique_meta_id(root, "mnemosyne-series")
+
+                node = ET.Element(f"{{{opf}}}meta")
+                node.attrib["id"] = series_id
+                node.attrib["property"] = "belongs-to-collection"
+                node.text = series_name
+                metadata.append(node)
+
+                collection_type = ET.Element(f"{{{opf}}}meta")
+                collection_type.attrib["refines"] = f"#{series_id}"
+                collection_type.attrib["property"] = "collection-type"
+                collection_type.text = "series"
+                metadata.append(collection_type)
+
+                if series_index is not None:
+                    position = ET.Element(f"{{{opf}}}meta")
+                    position.attrib["refines"] = f"#{series_id}"
+                    position.attrib["property"] = "group-position"
+                    position.text = series_index
+                    metadata.append(position)
+            else:
+                node = ET.Element(f"{{{opf}}}meta")
+                node.attrib["name"] = "calibre:series"
+                node.attrib["content"] = series_name
+                metadata.append(node)
+
+                if series_index is not None:
+                    position = ET.Element(f"{{{opf}}}meta")
+                    position.attrib["name"] = "calibre:series_index"
+                    position.attrib["content"] = series_index
+                    metadata.append(position)
+
+        elif series_index is not None:
+            if style == "epub3" and existing_series is not None:
+                series_id = str(existing_series.attrib.get("id") or "").strip()
+                if not series_id:
+                    raise EbookNormalizationError(
+                        "Existing EPUB 3 series metadata has no id for group-position refinement."
+                    )
+                position = ET.Element(f"{{{opf}}}meta")
+                position.attrib["refines"] = f"#{series_id}"
+                position.attrib["property"] = "group-position"
+                position.text = series_index
+                metadata.append(position)
+            elif style == "calibre":
+                position = ET.Element(f"{{{opf}}}meta")
+                position.attrib["name"] = "calibre:series_index"
+                position.attrib["content"] = series_index
+                metadata.append(position)
+            else:
+                raise EbookNormalizationError(
+                    "Cannot add a series index without an embedded series declaration."
+                )
+
+    ET.register_namespace("", opf)
     ET.register_namespace("dc", dc)
     return ET.tostring(root, encoding="utf-8", xml_declaration=True)
 
@@ -366,6 +500,8 @@ def _verify_normalized_epub(
     *,
     expected_title: str | None,
     expected_creator: str | None,
+    expected_series: str | None,
+    expected_series_index: str | None,
 ) -> None:
     if not zipfile.is_zipfile(path):
         raise EbookNormalizationError(
@@ -409,6 +545,28 @@ def _verify_normalized_epub(
             "Normalized EPUB creator did not verify after rewrite."
         )
 
+    if expected_series is not None and inspection.series_name != expected_series:
+        raise EbookNormalizationError(
+            "Normalized EPUB series did not verify after rewrite."
+        )
+
+    if expected_series_index is not None:
+        actual_index = inspection.series_index
+        try:
+            index_matches = (
+                actual_index is not None
+                and Decimal(actual_index).is_finite()
+                and Decimal(expected_series_index).is_finite()
+                and Decimal(actual_index) == Decimal(expected_series_index)
+            )
+        except (InvalidOperation, ValueError):
+            index_matches = False
+
+        if not index_matches:
+            raise EbookNormalizationError(
+                "Normalized EPUB series index did not verify after rewrite."
+            )
+
 def apply_ebook_normalization(path: Path) -> EbookNormalizationResult:
     preview = preview_ebook_normalization(path)
     if preview.source_kind != "staging-job":
@@ -425,7 +583,7 @@ def apply_ebook_normalization(path: Path) -> EbookNormalizationResult:
         for action in preview.actions
         if action.status == "add"
         and action.proposed_value
-        and action.field in {"title", "creator"}
+        and action.field in {"title", "creator", "series", "series-index"}
     }
     if not additions:
         raise EbookNormalizationError(
@@ -470,6 +628,8 @@ def apply_ebook_normalization(path: Path) -> EbookNormalizationResult:
             temp,
             expected_title=additions.get("title"),
             expected_creator=additions.get("creator"),
+            expected_series=additions.get("series"),
+            expected_series_index=additions.get("series-index"),
         )
 
         normalized_sha = _sha256(temp)
@@ -497,6 +657,8 @@ def apply_ebook_normalization(path: Path) -> EbookNormalizationResult:
             source,
             expected_title=additions.get("title"),
             expected_creator=additions.get("creator"),
+            expected_series=additions.get("series"),
+            expected_series_index=additions.get("series-index"),
         )
 
         applied_at = datetime.now(timezone.utc).isoformat()
@@ -520,7 +682,10 @@ def apply_ebook_normalization(path: Path) -> EbookNormalizationResult:
             "safety": {
                 "conflictsBlocked": True,
                 "publicationDateModified": False,
-                "seriesModified": False,
+                "seriesModified": any(
+                    field in additions
+                    for field in ("series", "series-index")
+                ),
                 "finalLibraryModified": False,
             },
         }

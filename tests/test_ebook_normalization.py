@@ -327,3 +327,297 @@ def test_fetch_report_write_failure_rolls_back_epub(
     assert not (
         job / "ebook-normalization-report.json"
     ).exists()
+
+
+
+def _make_series_job(
+    tmp_path: Path,
+    *,
+    embedded_series: str | None = None,
+    embedded_series_index: str | None = None,
+    verified_series: str = "Verified Series",
+    verified_series_index: float = 2,
+    epub_version: str = "3.0",
+) -> Path:
+    job = tmp_path / "series-job"
+    job.mkdir()
+    epub = job / "series.epub"
+
+    series_markup = ""
+    if embedded_series is not None:
+        if epub_version.startswith("3"):
+            series_markup = (
+                "<meta id='series' property='belongs-to-collection'>"
+                f"{embedded_series}</meta>"
+                "<meta refines='#series' property='collection-type'>series</meta>"
+            )
+            if embedded_series_index is not None:
+                series_markup += (
+                    "<meta refines='#series' property='group-position'>"
+                    f"{embedded_series_index}</meta>"
+                )
+        else:
+            series_markup = (
+                "<meta name='calibre:series' "
+                f"content='{embedded_series}'/>"
+            )
+            if embedded_series_index is not None:
+                series_markup += (
+                    "<meta name='calibre:series_index' "
+                    f"content='{embedded_series_index}'/>"
+                )
+
+    package = f"""<?xml version="1.0" encoding="UTF-8"?>
+<package xmlns="http://www.idpf.org/2007/opf"
+         xmlns:dc="http://purl.org/dc/elements/1.1/"
+         version="{epub_version}">
+  <metadata>
+    <dc:title>Verified Title</dc:title>
+    <dc:creator>Verified Author</dc:creator>
+    <dc:identifier>urn:test:series</dc:identifier>
+    {series_markup}
+  </metadata>
+  <manifest/>
+</package>
+"""
+    container = """<?xml version="1.0"?>
+<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container" version="1.0">
+  <rootfiles>
+    <rootfile full-path="content.opf" media-type="application/oebps-package+xml"/>
+  </rootfiles>
+</container>
+"""
+
+    with zipfile.ZipFile(epub, "w") as archive:
+        mimetype = zipfile.ZipInfo("mimetype")
+        mimetype.compress_type = zipfile.ZIP_STORED
+        archive.writestr(mimetype, "application/epub+zip")
+        archive.writestr("META-INF/container.xml", container)
+        archive.writestr("content.opf", package)
+
+    sha = hashlib.sha256(epub.read_bytes()).hexdigest()
+    report = {
+        "schemaVersion": 2,
+        "jobId": "series-job",
+        "status": "staged-verified",
+        "stagedFile": epub.name,
+        "finalLibraryModified": False,
+        "work": {
+            "title": "Verified Title",
+            "creator": "Verified Author",
+            "year": 2024,
+            "series": verified_series,
+            "seriesIndex": verified_series_index,
+            "seriesProvenance": "verified-override",
+            "seriesIndexProvenance": "verified-override",
+        },
+        "verification": {
+            "actualSize": epub.stat().st_size,
+            "sha256": sha,
+            "formatVerified": True,
+        },
+    }
+    (job / "ebook-fetch-report.json").write_text(
+        json.dumps(report),
+        encoding="utf-8",
+    )
+    return job
+
+
+def test_missing_verified_series_becomes_additions(
+    tmp_path: Path,
+) -> None:
+    job = _make_series_job(tmp_path)
+
+    preview = preview_ebook_normalization(job)
+    by_field = {action.field: action for action in preview.actions}
+
+    assert by_field["series"].status == "add"
+    assert by_field["series"].proposed_value == "Verified Series"
+    assert by_field["series-index"].status == "add"
+    assert by_field["series-index"].proposed_value == "2"
+    assert preview.conflicts == 0
+    assert preview.blocked is False
+
+
+def test_matching_verified_series_is_preserved(
+    tmp_path: Path,
+) -> None:
+    job = _make_series_job(
+        tmp_path,
+        embedded_series="Verified Series",
+        embedded_series_index="2.0",
+    )
+
+    preview = preview_ebook_normalization(job)
+    by_field = {action.field: action for action in preview.actions}
+
+    assert by_field["series"].status == "preserve"
+    assert by_field["series-index"].status == "preserve"
+    assert preview.conflicts == 0
+
+
+def test_conflicting_series_blocks_normalization(
+    tmp_path: Path,
+) -> None:
+    job = _make_series_job(
+        tmp_path,
+        embedded_series="Wrong Series",
+        embedded_series_index="2",
+    )
+
+    preview = preview_ebook_normalization(job)
+    by_field = {action.field: action for action in preview.actions}
+
+    assert by_field["series"].status == "conflict"
+    assert preview.blocked is True
+
+    with pytest.raises(EbookNormalizationError, match="conflicts"):
+        apply_ebook_normalization(job)
+
+
+def test_apply_adds_epub3_series_metadata_transactionally(
+    tmp_path: Path,
+) -> None:
+    job = _make_series_job(tmp_path)
+    epub = job / "series.epub"
+    original_sha = hashlib.sha256(epub.read_bytes()).hexdigest()
+
+    result = apply_ebook_normalization(job)
+
+    assert result.normalized_sha256 != original_sha
+    assert "series" in result.additions
+    assert "series-index" in result.additions
+
+    inspection = inspect_ebook_metadata(epub)
+    assert inspection.series_name == "Verified Series"
+    assert inspection.series_index == "2"
+
+    with zipfile.ZipFile(epub) as archive:
+        package = archive.read("content.opf").decode("utf-8")
+        assert 'property="belongs-to-collection"' in package
+        assert 'property="collection-type"' in package
+        assert 'property="group-position"' in package
+        assert "calibre:series" not in package
+
+    report = json.loads(
+        result.normalization_report_path.read_text(encoding="utf-8")
+    )
+    assert report["safety"]["seriesModified"] is True
+
+    second_preview = preview_ebook_normalization(job)
+    assert second_preview.additions == 0
+    assert second_preview.conflicts == 0
+
+
+def test_apply_uses_calibre_series_metadata_for_epub2(
+    tmp_path: Path,
+) -> None:
+    job = _make_series_job(
+        tmp_path,
+        epub_version="2.0",
+    )
+    epub = job / "series.epub"
+
+    apply_ebook_normalization(job)
+
+    inspection = inspect_ebook_metadata(epub)
+    assert inspection.series_name == "Verified Series"
+    assert inspection.series_index == "2"
+
+    with zipfile.ZipFile(epub) as archive:
+        package = archive.read("content.opf").decode("utf-8")
+        assert 'name="calibre:series"' in package
+        assert 'name="calibre:series_index"' in package
+
+
+def test_adds_missing_index_to_existing_matching_epub3_series(
+    tmp_path: Path,
+) -> None:
+    job = _make_series_job(
+        tmp_path,
+        embedded_series="Verified Series",
+        embedded_series_index=None,
+    )
+
+    preview = preview_ebook_normalization(job)
+    by_field = {action.field: action for action in preview.actions}
+    assert by_field["series"].status == "preserve"
+    assert by_field["series-index"].status == "add"
+
+    apply_ebook_normalization(job)
+
+    inspection = inspect_ebook_metadata(job)
+    assert inspection.series_name == "Verified Series"
+    assert inspection.series_index == "2"
+
+
+@pytest.mark.parametrize("index", ["NaN", "Infinity", "-1", "invalid"])
+def test_invalid_verified_series_index_blocks(tmp_path: Path, index: str) -> None:
+    job = _make_series_job(tmp_path, verified_series_index=index)
+    before = {p.name: p.read_bytes() for p in job.iterdir()}
+    with pytest.raises(EbookNormalizationError, match="finite non-negative"):
+        apply_ebook_normalization(job)
+    assert {p.name: p.read_bytes() for p in job.iterdir()} == before
+
+
+def test_verified_index_without_verified_series_blocks(tmp_path: Path) -> None:
+    job = _make_series_job(tmp_path)
+    report_path = job / "ebook-fetch-report.json"
+    report = json.loads(report_path.read_text())
+    report["work"]["seriesProvenance"] = "provider"
+    report_path.write_text(json.dumps(report), encoding="utf-8")
+    with pytest.raises(EbookNormalizationError, match="requires a verified series"):
+        preview_ebook_normalization(job)
+
+
+def test_conflicting_series_index_blocks(tmp_path: Path) -> None:
+    job = _make_series_job(tmp_path, embedded_series="Verified Series", embedded_series_index="3")
+    assert preview_ebook_normalization(job).blocked
+    with pytest.raises(EbookNormalizationError, match="conflicts"):
+        apply_ebook_normalization(job)
+
+
+def test_fractional_series_index_preserves_decimal_precision(tmp_path: Path) -> None:
+    value = "2.123456789012345678901234567890123456789"
+    job = _make_series_job(tmp_path, verified_series_index=value)
+    apply_ebook_normalization(job)
+    assert inspect_ebook_metadata(job).series_index == value
+    assert preview_ebook_normalization(job).additions == 0
+
+
+def test_series_verification_failure_after_replace_rolls_back(tmp_path: Path, monkeypatch) -> None:
+    job = _make_series_job(tmp_path)
+    before = {p.name: p.read_bytes() for p in job.iterdir()}
+    original_verify = ebook_normalization._verify_normalized_epub
+    calls = 0
+
+    def fail_after_replace(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        original_verify(*args, **kwargs)
+        if calls == 2:
+            raise EbookNormalizationError("simulated series verification failure")
+
+    monkeypatch.setattr(ebook_normalization, "_verify_normalized_epub", fail_after_replace)
+    with pytest.raises(EbookNormalizationError, match="simulated"):
+        apply_ebook_normalization(job)
+    assert calls == 2
+    assert {p.name: p.read_bytes() for p in job.iterdir()} == before
+
+
+def test_series_id_avoids_non_meta_id_collision() -> None:
+    from xml.etree import ElementTree as ET
+    package = b'<package xmlns="http://www.idpf.org/2007/opf" version="3.0"><metadata/><manifest><item id="mnemosyne-series"/></manifest></package>'
+    root = ET.fromstring(ebook_normalization._rewrite_package(package, {"series": "Example"}))
+    ids = [e.attrib["id"] for e in root.iter() if "id" in e.attrib]
+    assert len(ids) == len(set(ids))
+
+
+def test_index_verification_rejects_float_rounding_match(tmp_path: Path) -> None:
+    job = _make_series_job(tmp_path, embedded_series="Verified Series", embedded_series_index="9007199254740992")
+    with pytest.raises(EbookNormalizationError, match="index did not verify"):
+        ebook_normalization._verify_normalized_epub(
+            job / "series.epub", expected_title=None, expected_creator=None,
+            expected_series="Verified Series", expected_series_index="9007199254740993",
+        )

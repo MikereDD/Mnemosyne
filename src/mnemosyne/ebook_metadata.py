@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import zipfile
+from decimal import Decimal, InvalidOperation
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -41,6 +42,8 @@ class EbookMetadataInspection:
     provenance_title: str | None
     provenance_creator: str | None
     provenance_year: int | None
+    provenance_series: str | None
+    provenance_series_index: str | None
     comparisons: tuple[MetadataComparison, ...]
 
 
@@ -113,6 +116,80 @@ def _normalize(value: str | None) -> str:
     if not value:
         return ""
     return _WS.sub(" ", value).strip().casefold()
+
+
+def _decimal_text(value: object) -> str | None:
+    if value is None:
+        return None
+    raw = str(value).strip()
+    if not raw:
+        return None
+    try:
+        number = Decimal(raw)
+    except InvalidOperation:
+        return raw
+    if not number.is_finite():
+        return raw
+    normalized = format(number, "f")
+    if "." in normalized:
+        normalized = normalized.rstrip("0").rstrip(".")
+    return normalized or "0"
+
+
+def _compare_series_index(
+    embedded: str | None,
+    provenance: str | None,
+) -> MetadataComparison:
+    embedded_value = _decimal_text(embedded)
+    provenance_value = _decimal_text(provenance)
+
+    if not embedded_value:
+        return MetadataComparison(
+            field="series-index",
+            embedded=None,
+            provenance=provenance_value,
+            status="missing-embedded",
+            note=(
+                "No embedded series index was found; verified provenance "
+                "remains authoritative evidence."
+            ),
+        )
+    if not provenance_value:
+        return MetadataComparison(
+            field="series-index",
+            embedded=embedded_value,
+            provenance=None,
+            status="unverified",
+            note=(
+                "Embedded series index exists but there is no verified "
+                "provenance value to compare."
+            ),
+        )
+
+    try:
+        matches = Decimal(embedded_value) == Decimal(provenance_value)
+    except InvalidOperation:
+        matches = _normalize(embedded_value) == _normalize(provenance_value)
+
+    if matches:
+        return MetadataComparison(
+            field="series-index",
+            embedded=embedded_value,
+            provenance=provenance_value,
+            status="match",
+            note="Embedded series index agrees with verified provenance.",
+        )
+
+    return MetadataComparison(
+        field="series-index",
+        embedded=embedded_value,
+        provenance=provenance_value,
+        status="conflict",
+        note=(
+            "Embedded series index differs from verified provenance; "
+            "do not silently normalize."
+        ),
+    )
 
 
 def _compare_text(
@@ -238,10 +315,18 @@ def _cover_reference(metadata: ET.Element, manifest: ET.Element | None) -> str |
     return cover_id
 
 
-def _load_provenance(job_dir: Path) -> tuple[str | None, str | None, int | None]:
+def _load_provenance(
+    job_dir: Path,
+) -> tuple[
+    str | None,
+    str | None,
+    int | None,
+    str | None,
+    str | None,
+]:
     report_path = job_dir / "ebook-fetch-report.json"
     if not report_path.is_file():
-        return None, None, None
+        return None, None, None, None, None
 
     try:
         report = json.loads(report_path.read_text(encoding="utf-8"))
@@ -253,12 +338,32 @@ def _load_provenance(job_dir: Path) -> tuple[str | None, str | None, int | None]
     work = report.get("work") or {}
     title = str(work.get("title") or "").strip() or None
     creator = str(work.get("creator") or "").strip() or None
+
     year_value = work.get("year")
     try:
         year = int(year_value) if year_value is not None else None
     except (TypeError, ValueError):
         year = None
-    return title, creator, year
+
+    series = None
+    series_index = None
+
+    if str(work.get("seriesProvenance") or "").strip() == "verified-override":
+        series = str(work.get("series") or "").strip() or None
+
+    if str(work.get("seriesIndexProvenance") or "").strip() == "verified-override":
+        series_index = _decimal_text(work.get("seriesIndex"))
+        if series_index is not None:
+            if series is None:
+                raise EbookMetadataError("Verified series index requires a verified series name.")
+            try:
+                number = Decimal(series_index)
+            except InvalidOperation as exc:
+                raise EbookMetadataError("Verified series index must be a finite non-negative number.") from exc
+            if not number.is_finite() or number < 0:
+                raise EbookMetadataError("Verified series index must be a finite non-negative number.")
+
+    return title, creator, year, series, series_index
 
 
 def _resolve_source(path: Path) -> tuple[Path, str, Path | None]:
@@ -357,13 +462,24 @@ def inspect_ebook_metadata(path: Path) -> EbookMetadataInspection:
     provenance_title: str | None = None
     provenance_creator: str | None = None
     provenance_year: int | None = None
+    provenance_series: str | None = None
+    provenance_series_index: str | None = None
+
     if job_dir is not None:
-        provenance_title, provenance_creator, provenance_year = _load_provenance(job_dir)
+        (
+            provenance_title,
+            provenance_creator,
+            provenance_year,
+            provenance_series,
+            provenance_series_index,
+        ) = _load_provenance(job_dir)
 
     creator_text = "; ".join(creators) if creators else None
     comparisons: list[MetadataComparison] = [
         _compare_text("title", title, provenance_title),
         _compare_text("creator", creator_text, provenance_creator),
+        _compare_text("series", series_name, provenance_series),
+        _compare_series_index(series_index, provenance_series_index),
     ]
 
     if dates:
@@ -398,5 +514,7 @@ def inspect_ebook_metadata(path: Path) -> EbookMetadataInspection:
         provenance_title=provenance_title,
         provenance_creator=provenance_creator,
         provenance_year=provenance_year,
+        provenance_series=provenance_series,
+        provenance_series_index=provenance_series_index,
         comparisons=tuple(comparisons),
     )

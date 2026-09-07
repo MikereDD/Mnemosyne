@@ -165,3 +165,72 @@ def test_rejects_missing_package_document(tmp_path: Path) -> None:
 
     with pytest.raises(EbookMetadataError, match="package document"):
         inspect_ebook_metadata(epub)
+
+
+
+def test_staging_job_compares_verified_series_provenance(
+    tmp_path: Path,
+) -> None:
+    job = tmp_path / "series-job"
+    job.mkdir()
+    epub = job / "staged.epub"
+    make_epub(epub)
+
+    report = {
+        "stagedFile": epub.name,
+        "work": {
+            "title": "Example Book",
+            "creator": "Example Author",
+            "year": 2024,
+            "series": "Example Series",
+            "seriesIndex": 2,
+            "seriesProvenance": "verified-override",
+            "seriesIndexProvenance": "verified-override",
+        },
+    }
+    (job / "ebook-fetch-report.json").write_text(
+        json.dumps(report),
+        encoding="utf-8",
+    )
+
+    result = inspect_ebook_metadata(job)
+
+    statuses = {item.field: item.status for item in result.comparisons}
+    assert statuses["series"] == "match"
+    assert statuses["series-index"] == "match"
+    assert result.provenance_series == "Example Series"
+    assert result.provenance_series_index == "2"
+
+
+def test_unverified_series_provenance_is_not_authoritative(
+    tmp_path: Path,
+) -> None:
+    job = tmp_path / "unverified-series-job"
+    job.mkdir()
+    epub = job / "staged.epub"
+    make_epub(epub, series=False)
+
+    report = {
+        "stagedFile": epub.name,
+        "work": {
+            "title": "Example Book",
+            "creator": "Example Author",
+            "year": 2024,
+            "series": "Provider Guess",
+            "seriesIndex": 4,
+            "seriesProvenance": "provider",
+            "seriesIndexProvenance": "provider",
+        },
+    }
+    (job / "ebook-fetch-report.json").write_text(
+        json.dumps(report),
+        encoding="utf-8",
+    )
+
+    result = inspect_ebook_metadata(job)
+
+    comparisons = {item.field: item for item in result.comparisons}
+    assert comparisons["series"].provenance is None
+    assert comparisons["series-index"].provenance is None
+    assert result.provenance_series is None
+    assert result.provenance_series_index is None

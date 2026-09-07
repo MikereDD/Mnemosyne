@@ -833,7 +833,8 @@ def render_ebook_normalization_result(
             "Post-commit SHA-256 verified: YES\n"
             "Fetch provenance updated: YES\n"
             "Publication date modified: NO\n"
-            "Series metadata modified: NO\n"
+            f"Series metadata modified: "
+            f"{'YES' if any(field in result.additions for field in ('series', 'series-index')) else 'NO'}\n"
             "Final library modified: NO",
             border_style="green",
         )
