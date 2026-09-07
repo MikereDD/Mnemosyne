@@ -124,8 +124,15 @@ from .render import (
     render_multifile_cleanup_result,
     render_prune_preview,
     render_prune_result,
+    render_staging_discard_preview,
+    render_staging_discard_result,
 )
 from .tagging import TaggingError, apply_metadata_normalization, preview_metadata_normalization
+from .staging_discard import (
+    StagingDiscardError,
+    apply_staging_discard,
+    preview_staging_discard,
+)
 
 app = typer.Typer(
     help=(
@@ -849,6 +856,67 @@ def ebook_cleanup_command(
         raise typer.Exit(code=33) from exc
 
     render_ebook_cleanup_result(result)
+
+
+@app.command("staging-discard")
+def staging_discard_command(
+    job: Annotated[
+        Path,
+        typer.Argument(
+            help=(
+                "Staging job directory or bare job ID. "
+                "Only direct children of Mnemosyne's staging root are eligible."
+            )
+        ),
+    ],
+    apply: Annotated[
+        bool,
+        typer.Option(
+            "--apply",
+            help=(
+                "Write and verify a durable discard receipt, then remove only "
+                "the isolated staging job."
+            ),
+        ),
+    ] = False,
+    confirm: Annotated[
+        str | None,
+        typer.Option(
+            "--confirm",
+            help="Required with --apply. Must exactly match the staging job ID.",
+        ),
+    ] = None,
+) -> None:
+    """Preview or safely abandon an unplaced staged job."""
+    try:
+        preview = preview_staging_discard(job)
+    except (StagingDiscardError, OSError) as exc:
+        console.print(f"[bold red]Staging discard blocked:[/bold red] {exc}")
+        raise typer.Exit(code=38) from exc
+
+    if not apply:
+        render_staging_discard_preview(preview)
+        return
+
+    if not preview.discard_allowed:
+        render_staging_discard_preview(preview)
+        raise typer.Exit(code=39)
+
+    if confirm is None:
+        render_staging_discard_preview(preview)
+        console.print(
+            "[bold red]Staging discard blocked:[/bold red] "
+            "--confirm must exactly match the job ID."
+        )
+        raise typer.Exit(code=39)
+
+    try:
+        result = apply_staging_discard(job, confirm_job_id=confirm)
+    except (StagingDiscardError, OSError) as exc:
+        console.print(f"[bold red]Staging discard failed:[/bold red] {exc}")
+        raise typer.Exit(code=40) from exc
+
+    render_staging_discard_result(result)
 
 
 @app.command("complete")

@@ -40,6 +40,7 @@ from .placement import PlacementPreview, PlacementResult
 from .readiness import ReadinessResult
 from .prune import PrunePreview, PruneResult
 from .tagging import TaggingPreview, TaggingResult
+from .staging_discard import StagingDiscardPreview, StagingDiscardResult
 
 console = Console()
 
@@ -1033,6 +1034,85 @@ def render_ebook_cleanup_result(result: EbookCleanupResult) -> None:
             "Final eBook re-verified immediately before deletion: YES\n"
             "Staging removed: YES\n"
             "Final library retained: YES",
+            border_style="green",
+        )
+    )
+
+
+def render_staging_discard_preview(preview: StagingDiscardPreview) -> None:
+    table = Table(show_header=False, box=None, pad_edge=False)
+    table.add_column(style="bold")
+    table.add_column()
+    table.add_row("Job", preview.job_id)
+    table.add_row("Staging directory", str(preview.job_dir))
+    table.add_row("Media", preview.media_type)
+    table.add_row("Status", preview.status)
+    table.add_row("Provenance report", str(preview.report_path))
+    table.add_row("Staging files", str(preview.file_count))
+    table.add_row("Staging size", _size(preview.staging_size_bytes))
+    table.add_row(
+        "Library modified",
+        "[red]YES[/red]" if preview.library_modified else "[green]NO[/green]",
+    )
+    table.add_row(
+        "Completion receipt",
+        f"[yellow]EXISTS[/yellow] — {preview.completion_receipt_path}"
+        if preview.completion_receipt_exists
+        else "NO",
+    )
+    table.add_row("Discard receipt", str(preview.discard_receipt_path))
+    console.print(
+        Panel(
+            table,
+            title="[bold yellow]STAGING DISCARD PREVIEW[/bold yellow]",
+            border_style="yellow",
+        )
+    )
+    if preview.blocked_reasons:
+        console.print(
+            Panel(
+                "\n".join(f"• {reason}" for reason in preview.blocked_reasons),
+                title="[bold red]DISCARD BLOCKED[/bold red]",
+                border_style="red",
+            )
+        )
+    else:
+        console.print(
+            Panel(
+                "Preview only: YES\n"
+                "Staging modified: NO\n"
+                "Final library modified: NO\n"
+                "A durable discard receipt will be written and verified before deletion.\n"
+                f"Apply requires --confirm {preview.job_id}",
+                border_style="yellow",
+            )
+        )
+
+
+def render_staging_discard_result(result: StagingDiscardResult) -> None:
+    table = Table(show_header=False, box=None, pad_edge=False)
+    table.add_column(style="bold")
+    table.add_column()
+    table.add_row("Job", result.job_id)
+    table.add_row("Media", result.media_type)
+    table.add_row("Status at discard", result.status_at_discard)
+    table.add_row("Removed staging", str(result.removed_job_dir))
+    table.add_row("Receipt", str(result.receipt_path))
+    table.add_row("Removed files", str(result.file_count))
+    table.add_row("Removed size", _size(result.staging_size_bytes))
+    console.print(
+        Panel(
+            table,
+            title="[bold green]STAGING DISCARDED + RECEIPT VERIFIED[/bold green]",
+            border_style="green",
+        )
+    )
+    console.print(
+        Panel(
+            "Durable discard receipt written before deletion: YES\n"
+            "Final discard receipt verified: YES\n"
+            "Staging removed: YES\n"
+            "Final library modified: NO",
             border_style="green",
         )
     )
