@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from mutagen.flac import FLAC, Picture
-from mutagen.id3 import APIC, TALB, TCON, TDRC, TIT2, TPE1, TPE2, TRCK
+from mutagen.id3 import APIC, ID3, ID3NoHeaderError, TALB, TCON, TDRC, TIT2, TPE1, TPE2, TPOS, TRCK
 from mutagen.mp3 import MP3
 from mutagen.mp4 import MP4, MP4Cover
 
@@ -24,8 +24,18 @@ class MetadataSnapshot:
     artwork: tuple[tuple[str, bytes], ...]
 
 _MP4_TAG_MAP = {"title":"\xa9nam","artist":"\xa9ART","album_artist":"aART","album":"\xa9alb","date":"\xa9day","genre":"\xa9gen"}
-_ID3_FRAME_MAP = {"title":TIT2,"artist":TPE1,"album_artist":TPE2,"album":TALB,"date":TDRC,"genre":TCON,"track":TRCK}
-_FLAC_TAG_MAP = {"title":"title","artist":"artist","album_artist":"albumartist","album":"album","date":"date","genre":"genre","track":"tracknumber"}
+_ID3_FRAME_MAP = {"title":TIT2,"artist":TPE1,"album_artist":TPE2,"album":TALB,"date":TDRC,"genre":TCON,"track":TRCK,"disc":TPOS}
+_FLAC_TAG_MAP = {"title":"title","artist":"artist","album_artist":"albumartist","album":"album","date":"date","genre":"genre","track":"tracknumber","disc":"discnumber"}
+
+def _number_pair(value: str) -> tuple[int, int]:
+    parts = value.split("/")
+    if len(parts) not in {1, 2} or any(not p.isdecimal() for p in parts):
+        raise MetadataIOError(f"Invalid track/disc number: {value!r}")
+    number = int(parts[0])
+    total = int(parts[1]) if len(parts) == 2 else 0
+    if number < 1 or number > 65535 or total > 65535 or (len(parts) == 2 and total < number):
+        raise MetadataIOError(f"Invalid track/disc number: {value!r}")
+    return number, total
 
 def metadata_family(path: Path) -> str:
     suffix = path.suffix.lower()
@@ -60,6 +70,8 @@ def _write_mp4(path: Path, tags: dict[str,str], cover_path: Path|None):
     for friendly,value in tags.items():
         atom = _MP4_TAG_MAP.get(friendly)
         if atom is not None: audio.tags[atom] = [value]
+        elif friendly in {"track", "disc"}:
+            audio.tags["trkn" if friendly == "track" else "disk"] = [_number_pair(value)]
     data, sha, mime = _cover_sha(cover_path)
     if data is not None and mime is not None:
         audio.tags["covr"] = [MP4Cover(data, imageformat=_mp4_cover_format(mime))]
@@ -73,11 +85,35 @@ def _replace_id3_front_cover(tags: Any, data: bytes, mime: str):
     for frame in preserved: tags.add(frame)
     tags.add(APIC(encoding=3,mime=mime,type=3,desc="Cover",data=data))
 
+def _assert_id3_preservable(path: Path) -> None:
+    """Read before Mutagen translation, which can discard obsolete ID3 frames."""
+    try:
+        raw = ID3(path, translate=False)
+    except ID3NoHeaderError:
+        return
+    except Exception as exc:
+        raise MetadataIOError(f"Could not inspect original ID3 frames: {exc}") from exc
+    legacy_version = raw.version[1] != 4
+    def inspect(frames):
+        if legacy_version and getattr(frames, "unknown_frames", []):
+            raise MetadataIOError("ID3 contains unknown legacy frames that cannot be safely preserved when writing ID3v2.4.")
+        for frame in frames.values():
+            frame_id = getattr(frame, "FrameID", type(frame).__name__)
+            if frame_id in {"RVAD", "EQUA", "TRDA", "TSIZ", "TDAT", "TIME"}:
+                raise MetadataIOError(f"Legacy ID3 frame {frame_id} cannot be safely preserved by this metadata writer.")
+            nested = getattr(frame, "sub_frames", None)
+            if nested is not None:
+                inspect(nested)
+    inspect(raw)
+
 def _write_id3(path: Path, tags: dict[str,str], cover_path: Path|None):
+    _assert_id3_preservable(path)
     try: audio = MP3(path)
     except Exception as exc: raise MetadataIOError(f"Could not open MP3 audio: {exc}") from exc
     if audio.tags is None: audio.add_tags()
     assert audio.tags is not None
+    if audio.tags.unknown_frames and audio.tags.version[1] != 4:
+        raise MetadataIOError("ID3 contains unknown legacy frames that cannot be safely preserved when writing ID3v2.4.")
     for friendly,value in tags.items():
         frame_type = _ID3_FRAME_MAP.get(friendly)
         if frame_type is None: continue
@@ -126,8 +162,13 @@ def _snapshot_mp4(path: Path):
     for name,atom in _MP4_TAG_MAP.items():
         vals=tags.get(atom)
         if vals: friendly[name]=_text_list(vals)
+    for name, atom in (("track", "trkn"), ("disc", "disk")):
+        pairs = tags.get(atom)
+        if pairs:
+            number, total = pairs[0]
+            friendly[name] = [f"{number}/{total}" if total else str(number)]
     for key,value in tags.items():
-        if key=="covr" or key in _MP4_TAG_MAP.values(): continue
+        if key in {"covr", "trkn", "disk"} or key in _MP4_TAG_MAP.values(): continue
         friendly[key]=_text_list(value)
     artwork=[]
     for c in tags.get("covr") or []:
@@ -141,6 +182,7 @@ def _first_id3_text(tags: Any, frame_id: str):
     return _text_list(getattr(frames[0],"text",None))
 
 def _snapshot_id3(path: Path):
+    _assert_id3_preservable(path)
     audio=MP3(path); tags=audio.tags; friendly={}
     artwork=()
     if tags is not None:
@@ -151,8 +193,16 @@ def _snapshot_id3(path: Path):
         for frame in tags.values():
             fid=getattr(frame,"FrameID",type(frame).__name__)
             if fid in canonical or fid=="APIC": continue
+            # Mutagen omits blank text frames when saving; these carry no value.
+            if fid.startswith("T") and fid != "TXXX" and hasattr(frame, "text") and not any(str(value) for value in frame.text):
+                continue
             friendly.setdefault(fid,[]).append(str(frame))
+        # Independent ID3 frames of one kind have no meaningful serialized order.
+        for key in set(friendly) - set(_ID3_FRAME_MAP):
+            friendly[key].sort()
         artwork=tuple((str(getattr(f,"mime","") or "application/octet-stream"),bytes(f.data)) for f in tags.getall("APIC"))
+        if tags.unknown_frames:
+            friendly["_unknown_id3_frames"] = sorted(hashlib.sha256(frame).hexdigest() for frame in tags.unknown_frames)
     return MetadataSnapshot("id3",friendly,artwork)
 
 def _snapshot_flac(path: Path):

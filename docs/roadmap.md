@@ -116,6 +116,13 @@ Celtic Punk tag → Punk filesystem genre
 
 The tag remains detailed; only physical placement is generalized.
 
+### Targeted existing-album normalization
+
+- [x] Arbitrary album folder and user-selected MusicBrainz release URL
+- [x] Preview complete track matches, canonical filenames, and tags
+- [x] Explicit apply with retained originals, playlist updates, and payload verification
+- [ ] Additional music metadata-source adapters
+
 ### eBook and audiobook organization
 
 - [ ] Author-first physical hierarchy

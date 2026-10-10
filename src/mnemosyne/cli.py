@@ -5,6 +5,7 @@ from typing import Annotated
 
 import typer
 
+from .album_cli import album_command
 from .adoption import AdoptionError, adopt_latest_recommended_edition
 from .batch import (
     BatchQueueError,
@@ -155,6 +156,8 @@ app = typer.Typer(
     ),
     no_args_is_help=True,
 )
+
+app.command("album")(album_command)
 
 
 def _build_plan(
