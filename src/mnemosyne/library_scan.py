@@ -20,6 +20,7 @@ class LibraryScanError(RuntimeError):
 
 class LibraryScanMedia(str, Enum):
     EBOOK = "ebook"
+    MUSIC = "music"
 
 
 @dataclass(frozen=True)

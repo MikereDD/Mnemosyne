@@ -53,6 +53,12 @@ from .models import MediaType
 from .library_scan import LibraryScanError, LibraryScanMedia, scan_library
 from .library_identify import LibraryIdentifyError, identify_library
 from .library_plan import LibraryPlanError, plan_library
+from .music_library import (
+    MusicLibraryError,
+    identify_music_library,
+    plan_music_library,
+    scan_music_library,
+)
 from .multifile_metadata import (
     MultiFileMetadataError,
     apply_multifile_tagging,
@@ -217,12 +223,35 @@ def library_scan_command(
         LibraryScanMedia,
         typer.Option(
             "--media",
-            help="Existing-library media family to scan. The first implemented scanner is ebook.",
+            help="Existing-library media family to scan. Supports ebook and music.",
         ),
     ] = LibraryScanMedia.EBOOK,
+    music_root: Annotated[
+        Path | None,
+        typer.Option("--music-root", help="Music library root."),
+    ] = None,
+    only: Annotated[
+        Path | None,
+        typer.Option("--only", help="Album path relative to Music root."),
+    ] = None,
 ) -> None:
     """Inventory existing media structure without changing the media library."""
     config = load_config()
+    if media is LibraryScanMedia.MUSIC:
+        try:
+            root = music_root if music_root is not None else (
+                config.library_root / config.library.music
+            )
+            result = scan_music_library(root, only=only)
+        except (MusicLibraryError, OSError) as exc:
+            console.print(f"[red]Music scan failed:[/red] {exc}")
+            raise typer.Exit(code=41) from exc
+        console.print(f"Music scan (read-only): {result['summary']}")
+        console.print(f"Report: {result['reportPath']}")
+        return
+    if music_root is not None or only is not None:
+        console.print("--music-root and --only require --media music.")
+        raise typer.Exit(code=41)
     try:
         result = scan_library(
             config.library_root,
@@ -241,7 +270,7 @@ def library_identify_command(
         LibraryScanMedia,
         typer.Option(
             "--media",
-            help="Existing-library media family to identify. The first implemented identifier is ebook.",
+            help="Existing-library media family to identify. Supports ebook and music.",
         ),
     ] = LibraryScanMedia.EBOOK,
     scan_report: Annotated[
@@ -256,6 +285,23 @@ def library_identify_command(
     ] = None,
 ) -> None:
     """Build a read-only evidence/confidence identity plan from a durable library scan."""
+    if media is LibraryScanMedia.MUSIC:
+        try:
+            result = identify_music_library(scan_report=scan_report)
+        except (MusicLibraryError, OSError) as exc:
+            console.print(f"[red]Music identification failed:[/red] {exc}")
+            raise typer.Exit(code=42) from exc
+        console.print(f"Music identification (read-only): {result['summary']}")
+        for track in result["tracks"]:
+            ident = track["identity"]
+            console.print(
+                f"{track['confidence']}: {ident['artist']} — "
+                f"{ident['album']} — {ident['title']} "
+                f"(disc {ident['disc']}, track {ident['track']}, "
+                f"genre {ident['genre'] or 'UNRESOLVED'})"
+            )
+        console.print(f"Report: {result['reportPath']}")
+        return
     config = load_config()
     try:
         result = identify_library(
@@ -277,7 +323,7 @@ def library_plan_command(
         LibraryScanMedia,
         typer.Option(
             "--media",
-            help="Existing-library media family to plan. The first implemented planner is ebook.",
+            help="Existing-library media family to plan. Supports ebook and music.",
         ),
     ] = LibraryScanMedia.EBOOK,
     identification_report: Annotated[
@@ -293,6 +339,24 @@ def library_plan_command(
     ] = None,
 ) -> None:
     """Build an exact read-only filesystem plan for an identified existing library."""
+    if media is LibraryScanMedia.MUSIC:
+        try:
+            result = plan_music_library(
+                identification_report=identification_report
+            )
+        except (MusicLibraryError, OSError) as exc:
+            console.print(f"[red]Music plan failed:[/red] {exc}")
+            raise typer.Exit(code=43) from exc
+        console.print(f"Music plan (read-only): {result['summary']}")
+        for track in result["tracks"]:
+            console.print(f"{track['status']}: {track['source']}")
+            console.print(f"  Proposed: {track['target'] or 'UNRESOLVED'}")
+            if track["blockedReasons"]:
+                console.print(
+                    f"  Reasons: {'; '.join(track['blockedReasons'])}"
+                )
+        console.print(f"Report: {result['reportPath']}")
+        return
     config = load_config()
     try:
         result = plan_library(
