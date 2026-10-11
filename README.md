@@ -192,7 +192,9 @@ Existing music albums can be renamed and tagged from a user-selected
 MusicBrainz release page with `uv run mnemosyne album`. The command prompts
 for an arbitrary album folder and source URL, then previews filenames and
 tags. `--apply` saves the displayed changes after confirmation, retaining
-original backups. See [album renaming and tagging](docs/album-renaming.md).
+original backups. Flat albums with multiple discs use verified disc and track
+mapping, with filenames such as `101` and `201` to retain disc order. See
+[album renaming and tagging](docs/album-renaming.md).
 
 Mnemosyne distinguishes stable structural relationships from descriptive
 metadata. Genre is structural for the music filesystem, but not for books or

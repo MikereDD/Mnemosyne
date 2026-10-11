@@ -71,12 +71,18 @@ def album_command(
         console.print(Text(f"Release date: {metadata.date or 'not supplied; existing date retained'}"))
         console.print("Filename format: " + ("track - title - album - author - (year)" if filename_format == AlbumFilenameFormat.FULL else "track - title"))
         table = Table(title="Album rename and tag preview")
+        multiple_discs = len({track.tags.get("disc", "1/1").split("/")[0] for track in plan.tracks}) > 1
+        if multiple_discs:
+            table.add_column("Disc")
         table.add_column("Track")
         table.add_column("Current filename")
         table.add_column("New filename")
         table.add_column("Artist")
         for track in plan.tracks:
-            table.add_row(track.tags["track"], track.source.name, track.target.name, track.tags["artist"])
+            row = [track.tags["track"], track.source.name, track.target.name, track.tags["artist"]]
+            if multiple_discs:
+                row.insert(0, track.tags["disc"])
+            table.add_row(*row)
         console.print(table)
         console.print("Tags: title, artist, album artist, album, track and disc number, and release date when supplied.")
         console.print(Text(f"Playlists to update: {len(plan.playlists)}"))

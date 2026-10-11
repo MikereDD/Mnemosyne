@@ -32,7 +32,7 @@ def _read_fake(path):
 
 @pytest.fixture
 def fake_audio(monkeypatch):
-    def read(path):
+    def read(path, *, replacing_date=False):
         tags, _ = _read_fake(path)
         return MetadataSnapshot("id3", tags, (("image/png", b"original artwork"),))
 
@@ -148,13 +148,13 @@ def test_duplicate_local_mapping_is_blocked(album):
         library.preview_album(folder, release)
 
 
-def test_incomplete_album_and_multi_disc_release_are_blocked(album):
+def test_incomplete_album_and_noncontiguous_release_discs_are_blocked(album):
     folder, release = album
     next(folder.glob("02*.mp3")).unlink()
     with pytest.raises(library.AlbumLibraryError, match="incomplete"):
         library.preview_album(folder, release)
     multidisc = AlbumMetadata(release.source_url, release.release_id, release.title, release.artist, release.date, (AlbumTrack(2, 1, "Plus tôt", release.artist, 120000),))
-    with pytest.raises(library.AlbumLibraryError, match="Multi-disc"):
+    with pytest.raises(library.AlbumLibraryError, match="Release disc positions"):
         library.preview_album(folder, multidisc)
 
 
@@ -417,7 +417,11 @@ def test_full_filename_blocks_missing_or_invalid_release_year(album, release_dat
     release = replace(release, date=release_date)
     with pytest.raises(library.AlbumLibraryError, match="known valid MusicBrainz release year"):
         library.preview_album(folder, release, filename_format=library.AlbumFilenameFormat.FULL)
-    assert library.preview_album(folder, release).tracks[0].target.name == "01 - Plus tôt.mp3"
+    if release_date is None:
+        assert library.preview_album(folder, release).tracks[0].target.name == "01 - Plus tôt.mp3"
+    else:
+        with pytest.raises(library.AlbumLibraryError, match="known valid MusicBrainz release year"):
+            library.preview_album(folder, release)
 
 
 @pytest.mark.parametrize("release_date", ["2018", "2018-10", "2018-10-05"])
@@ -453,3 +457,302 @@ def test_full_filename_apply_updates_playlist_and_repeated_preview_is_stable(alb
     report = json.loads(result.report_path.read_text(encoding="utf-8"))
     assert report["filenameFormat"] == "full"
     assert report["source"]["date"] == "2018-10-05"
+
+
+def _make_multidisc_album(tmp_path, counts=(2, 3)):
+    folder = tmp_path / "multidisc"
+    folder.mkdir()
+    tracks = []
+    for disc, count in enumerate(counts, 1):
+        for number in range(1, count + 1):
+            title = "Shared title" if number == 1 else f"Disc {disc} Track {number}"
+            length = 120000 + disc * 10000 + number * 1000
+            if number == 11:
+                title, length = ("African Herbsman", 145000) if disc == 1 else ("Mellow Mood", 211000)
+            track = AlbumTrack(disc, number, title, "Bob Marley", length)
+            tracks.append(track)
+            tags = {"title": [title], "track": [f"{number}/{count}"], "disc": [f"{disc}/{len(counts)}"], "genre": ["Reggae"], "COMM": [f"Keep disc {disc}, track {number}"]}
+            (folder / f"{disc}{number:02d} - {title}_{GUID}.mp3").write_bytes(_mp3_bytes(tags, f"audio|{length}|{disc}-{number}".encode()))
+    metadata = AlbumMetadata("https://musicbrainz.org/release/12345678-1234-1234-1234-123456789abc", "12345678-1234-1234-1234-123456789abc", "White Collection - Lion of Zion", "Bob Marley", "2008", tuple(tracks))
+    return folder, metadata
+
+
+@pytest.fixture
+def multidisc_album(tmp_path, fake_audio):
+    return _make_multidisc_album(tmp_path)
+
+
+def _change_fake_tags(path, **changes):
+    tags, payload = _read_fake(path)
+    for key, value in changes.items():
+        if value is None:
+            tags.pop(key, None)
+        else:
+            tags[key] = value if isinstance(value, list) else [value]
+    path.write_bytes(_mp3_bytes(tags, payload))
+
+
+def test_multidisc_preview_has_unique_disc_positions_per_disc_totals_and_names(multidisc_album):
+    folder, metadata = multidisc_album
+    before = {path.name: path.read_bytes() for path in folder.iterdir()}
+    metadata = replace(metadata, tracks=tuple(reversed(metadata.tracks)))
+    plan = library.preview_album(folder, metadata)
+    assert [(track.tags["disc"], track.tags["track"]) for track in plan.tracks] == [("1/2", "1/2"), ("1/2", "2/2"), ("2/2", "1/3"), ("2/2", "2/3"), ("2/2", "3/3")]
+    assert [track.target.name for track in plan.tracks] == ["101 - Shared title.mp3", "102 - Disc 1 Track 2.mp3", "201 - Shared title.mp3", "202 - Disc 2 Track 2.mp3", "203 - Disc 2 Track 3.mp3"]
+    assert before == {path.name: path.read_bytes() for path in folder.iterdir()}
+
+
+def test_missing_disc_with_stale_valid_filename_disc_requires_unique_strong_evidence(tmp_path, fake_audio):
+    folder, metadata = _make_multidisc_album(tmp_path, (14, 14))
+    source = next(folder.glob("211*.mp3"))
+    _change_fake_tags(source, disc=None)
+    stale = folder / source.name.replace("211", "111", 1)
+    source.rename(stale)
+    plan = library.preview_album(folder, metadata)
+    track = next(track for track in plan.tracks if track.source == stale)
+    assert track.target.name == "211 - Mellow Mood.mp3"
+    assert track.tags["disc"] == "2/2"
+    assert track.tags["track"] == "11/14"
+    assert "filename-position-overridden" in track.matching_evidence
+    assert "matching-title" in track.matching_evidence
+    assert "matching-duration" in track.matching_evidence
+
+
+def test_stale_filename_cannot_win_when_its_wrong_disc_has_the_same_duration(tmp_path, fake_audio):
+    folder, metadata = _make_multidisc_album(tmp_path, (14, 14))
+    metadata = replace(metadata, tracks=tuple(replace(track, length_ms=211000) if (track.disc, track.number) == (1, 11) else track for track in metadata.tracks))
+    first = next(folder.glob("111*.mp3"))
+    tags, _ = _read_fake(first)
+    first.write_bytes(_mp3_bytes(tags, b"audio|211000|1-11"))
+    source = next(folder.glob("211*.mp3"))
+    _change_fake_tags(source, disc=None)
+    stale = folder / source.name.replace("211", "111", 1)
+    source.rename(stale)
+    plan = library.preview_album(folder, metadata)
+    assert next(track for track in plan.tracks if track.source == stale).tags["disc"] == "2/2"
+
+
+@pytest.mark.parametrize("missing", ["title", "duration", "release-duration"])
+def test_stale_missing_disc_filename_cannot_recover_without_both_title_and_duration(tmp_path, fake_audio, monkeypatch, missing):
+    folder, metadata = _make_multidisc_album(tmp_path, (14, 14))
+    source = next(folder.glob("211*.mp3"))
+    _change_fake_tags(source, disc=None, **({"title": None} if missing == "title" else {}))
+    stale = folder / source.name.replace("211", "111", 1)
+    source.rename(stale)
+    if missing == "duration":
+        duration = library._duration_ms
+        monkeypatch.setattr(library, "_duration_ms", lambda path: None if path == stale else duration(path))
+    elif missing == "release-duration":
+        metadata = replace(metadata, tracks=tuple(replace(track, length_ms=None) if (track.disc, track.number) == (2, 11) else track for track in metadata.tracks))
+    before = {path.name: path.read_bytes() for path in folder.iterdir()}
+    with pytest.raises(library.AlbumLibraryError, match="insufficient or conflicting"):
+        library.preview_album(folder, metadata)
+    assert before == {path.name: path.read_bytes() for path in folder.iterdir()}
+
+
+@pytest.mark.parametrize("changes", [{"disc": "1/2"}, {"track": "12/14"}, {"title": "African Herbsman"}])
+def test_recovery_never_overrides_conflicting_embedded_identity(tmp_path, fake_audio, changes):
+    folder, metadata = _make_multidisc_album(tmp_path, (14, 14))
+    source = next(folder.glob("211*.mp3"))
+    _change_fake_tags(source, **changes)
+    with pytest.raises(library.AlbumLibraryError, match="conflicting|Conflicting"):
+        library.preview_album(folder, metadata)
+
+
+def test_wrong_explicit_disc_is_blocked_even_when_both_discs_have_matching_duration(tmp_path, fake_audio):
+    folder, metadata = _make_multidisc_album(tmp_path, (14, 14))
+    metadata = replace(metadata, tracks=tuple(replace(track, length_ms=211000) if (track.disc, track.number) == (1, 11) else track for track in metadata.tracks))
+    first = next(folder.glob("111*.mp3"))
+    tags, _ = _read_fake(first)
+    first.write_bytes(_mp3_bytes(tags, b"audio|211000|1-11"))
+    _change_fake_tags(next(folder.glob("211*.mp3")), disc="1/2")
+    with pytest.raises(library.AlbumLibraryError, match="conflicting"):
+        library.preview_album(folder, metadata)
+
+
+def test_ambiguous_missing_disc_is_not_resolved_by_the_only_unassigned_slot(multidisc_album):
+    folder, metadata = multidisc_album
+    metadata = replace(metadata, tracks=tuple(replace(track, length_ms=131000) if track.number == 1 else track for track in metadata.tracks))
+    source = next(folder.glob("201*.mp3"))
+    tags, _ = _read_fake(source)
+    tags.pop("disc")
+    tags["track"] = ["1"]
+    source.write_bytes(_mp3_bytes(tags, b"audio|131000|2-1"))
+    source.rename(folder / f"01 - Shared title_{GUID}.mp3")
+    with pytest.raises(library.AlbumLibraryError, match="ambiguous"):
+        library.preview_album(folder, metadata)
+
+
+def test_duplicate_mapping_on_one_disc_is_blocked_despite_missing_other_position(multidisc_album):
+    folder, metadata = multidisc_album
+    first = next(folder.glob("201*.mp3"))
+    second = next(folder.glob("202*.mp3"))
+    second.unlink()
+    (folder / "201 - duplicate.mp3").write_bytes(first.read_bytes())
+    with pytest.raises(library.AlbumLibraryError, match="More than one local file matches release disc 2, track 1"):
+        library.preview_album(folder, metadata)
+
+
+@pytest.mark.parametrize("changes, message", [({"track": "1/99"}, "track total"), ({"disc": "1/99"}, "disc total"), ({"disc": "3/3"}, "disc number"), ({"track": "0/2"}, "Invalid embedded track"), ({"disc": "0/2"}, "Invalid embedded disc"), ({"disc": ["1/2", "2/2"]}, "Conflicting embedded disc"), ({"track": ["1/2", "2/2"]}, "Conflicting embedded track"), ({"track": "one/two"}, "Invalid embedded track")])
+def test_conflicting_or_malformed_embedded_positions_and_totals_block(multidisc_album, changes, message):
+    folder, metadata = multidisc_album
+    _change_fake_tags(next(folder.glob("101*.mp3")), **changes)
+    with pytest.raises(library.AlbumLibraryError, match=message):
+        library.preview_album(folder, metadata)
+
+
+@pytest.mark.parametrize("positions", [((1, 1), (1, 1)), ((1, 1), (1, 3)), ((1, 1), (3, 1)), ((0, 1), (1, 1)), ((True, 1), (2, 1))])
+def test_release_disc_and_track_positions_must_be_complete_and_unique(multidisc_album, positions):
+    folder, metadata = multidisc_album
+    metadata = replace(metadata, tracks=tuple(AlbumTrack(disc, number, "Title", "Bob Marley", 100000) for disc, number in positions))
+    with pytest.raises(library.AlbumLibraryError, match="Release (disc|track)"):
+        library.preview_album(folder, metadata)
+
+
+def test_numeric_track_only_filenames_remain_usable_with_trusted_disc_tags(multidisc_album):
+    folder, metadata = multidisc_album
+    for path in list(folder.glob("*.mp3")):
+        tags, _ = _read_fake(path)
+        number = int(tags["track"][0].split("/")[0])
+        path.rename(folder / f"{number:02d} - {tags['title'][0]} - Disc {tags['disc'][0].split('/')[0]}.mp3")
+    plan = library.preview_album(folder, metadata)
+    assert [track.target.name[:3] for track in plan.tracks] == ["101", "102", "201", "202", "203"]
+
+
+def test_combined_filename_disc_and_track_can_supply_missing_number_tags(multidisc_album):
+    folder, metadata = multidisc_album
+    source = next(folder.glob("201*.mp3"))
+    _change_fake_tags(source, disc=None, track=None)
+    plan = library.preview_album(folder, metadata)
+    track = next(track for track in plan.tracks if track.source == source)
+    assert track.tags["disc"] == "2/2"
+    assert "filename-disc-number" in track.matching_evidence
+
+
+def test_multidisc_filename_padding_supports_more_than_nine_discs(tmp_path, fake_audio):
+    folder, metadata = _make_multidisc_album(tmp_path, (1,) * 10)
+    plan = library.preview_album(folder, metadata)
+    assert plan.tracks[0].target.name == "0101 - Shared title.mp3"
+    assert plan.tracks[-1].target.name == "1001 - Shared title.mp3"
+    assert all((int(track.tags["disc"].split("/")[0]), 1) in library._filename_positions(track.target.name.split(" - ")[0], {disc: 1 for disc in range(1, 11)}) for track in plan.tracks)
+
+
+def test_multidisc_filename_padding_supports_more_than_ninety_nine_tracks(tmp_path, fake_audio):
+    folder, metadata = _make_multidisc_album(tmp_path, (100, 1))
+    plan = library.preview_album(folder, metadata)
+    assert plan.tracks[0].target.name == "1001 - Shared title.mp3"
+    assert plan.tracks[99].target.name == "1100 - Disc 1 Track 100.mp3"
+    assert plan.tracks[100].target.name == "2001 - Shared title.mp3"
+    assert plan.tracks[99].tags["track"] == "100/100"
+
+
+@pytest.mark.parametrize("filename_format", list(library.AlbumFilenameFormat))
+def test_multidisc_transaction_preserves_backups_payload_and_bom_playlist_and_repeats_stably(multidisc_album, tmp_path, filename_format):
+    folder, metadata = multidisc_album
+    sources = sorted(folder.glob("*.mp3"))
+    originals = {path.name: path.read_bytes() for path in sources}
+    playlist = folder / "album.m3u8"
+    playlist.write_bytes(b"\xef\xbb\xbf#EXTM3U\r\n" + "".join(path.name + "\r\n" for path in sources).encode())
+    plan = library.preview_album(folder, metadata, filename_format=filename_format)
+    result = library.apply_album(plan, tmp_path / "transactions")
+    assert playlist.read_bytes() == b"\xef\xbb\xbf#EXTM3U\r\n" + "".join(track.target.name + "\r\n" for track in plan.tracks).encode()
+    for track in plan.tracks:
+        assert (result.transaction_dir / "originals" / track.source.name).read_bytes() == originals[track.source.name]
+        assert library.audio_payload_sha256(track.target) == track.payload_sha256
+        tags, _ = _read_fake(track.target)
+        assert tags["genre"] == ["Reggae"]
+        assert tags["disc"] == [track.tags["disc"]]
+        assert tags["track"] == [track.tags["track"]]
+    assert library.preview_album(folder, metadata, filename_format=filename_format).rename_count == 0
+    assert not list(folder.glob(".mnemosyne*"))
+
+
+def test_multidisc_mid_commit_failure_restores_every_disc_and_playlist(multidisc_album, tmp_path, monkeypatch):
+    folder, metadata = multidisc_album
+    playlist = folder / "album.m3u"
+    playlist.write_text(next(folder.glob("201*.mp3")).name + "\n", encoding="utf-8")
+    before = {path.name: path.read_bytes() for path in folder.iterdir()}
+    plan = library.preview_album(folder, metadata)
+    rename = library._rename_no_overwrite
+
+    def fail_disc_two_install(source, target):
+        if ".new." in source.name and target.name.startswith("201"):
+            raise OSError("Injected disc two install failure")
+        rename(source, target)
+
+    monkeypatch.setattr(library, "_rename_no_overwrite", fail_disc_two_install)
+    with pytest.raises(library.AlbumLibraryError, match="original album restored"):
+        library.apply_album(plan, tmp_path / "transactions")
+    assert before == {path.name: path.read_bytes() for path in folder.iterdir()}
+
+
+@pytest.mark.parametrize("local_title, canonical_title", [("Track (With Guest)", "Track"), ("Track (feat. Guest)", "Track"), ("Track (Featuring Guest)", "Track"), ("Track (ft Guest)", "Track"), ("Track", "Track (Version 4)"), ("Track (With Guest)", "Track (Version 4)"), ("Track (Version 4) (With Guest)", "Track (Version 4)")])
+def test_compatible_title_qualification_requires_agreeing_position_and_duration(multidisc_album, local_title, canonical_title):
+    folder, metadata = multidisc_album
+    source = next(folder.glob("202*.mp3"))
+    _change_fake_tags(source, title=local_title)
+    metadata = replace(metadata, tracks=tuple(replace(track, title=canonical_title) if (track.disc, track.number) == (2, 2) else track for track in metadata.tracks))
+    plan = library.preview_album(folder, metadata)
+    track = next(track for track in plan.tracks if track.source == source)
+    assert track.tags["title"] == canonical_title
+    assert "compatible-title-qualification" in track.matching_evidence
+    assert "filename-position-overridden" not in track.matching_evidence
+
+
+@pytest.mark.parametrize("local_title, canonical_title", [("Track (Version 3)", "Track (Version 4)"), ("Track (Live)", "Track (Studio)"), ("Track (Remix)", "Track"), ("Unrelated title", "Track (Version 4)"), ("---", "Track")])
+def test_conflicting_explicit_qualifiers_and_unrelated_titles_are_blocked(multidisc_album, local_title, canonical_title):
+    folder, metadata = multidisc_album
+    source = next(folder.glob("202*.mp3"))
+    _change_fake_tags(source, title=local_title)
+    metadata = replace(metadata, tracks=tuple(replace(track, title=canonical_title) if (track.disc, track.number) == (2, 2) else track for track in metadata.tracks))
+    with pytest.raises(library.AlbumLibraryError, match="conflicting"):
+        library.preview_album(folder, metadata)
+
+
+@pytest.mark.parametrize("change", ["missing-disc", "missing-track", "stale-filename", "missing-duration"])
+def test_title_qualification_compatibility_never_resolves_missing_or_stale_identity(multidisc_album, monkeypatch, change):
+    folder, metadata = multidisc_album
+    source = next(folder.glob("202*.mp3"))
+    _change_fake_tags(source, title="Track")
+    metadata = replace(metadata, tracks=tuple(replace(track, title="Track (Version 4)") if (track.disc, track.number) == (2, 2) else track for track in metadata.tracks))
+    if change == "missing-disc":
+        _change_fake_tags(source, disc=None)
+    elif change == "missing-track":
+        _change_fake_tags(source, track=None)
+    elif change == "stale-filename":
+        source.rename(folder / source.name.replace("202", "102", 1))
+    else:
+        duration = library._duration_ms
+        monkeypatch.setattr(library, "_duration_ms", lambda path: None if path == source else duration(path))
+    with pytest.raises(library.AlbumLibraryError, match="conflicting"):
+        library.preview_album(folder, metadata)
+
+
+def test_invalid_release_date_is_blocked_before_requesting_metadata_replacement(album, monkeypatch):
+    folder, metadata = album
+    metadata = replace(metadata, date="invalid")
+    monkeypatch.setattr(library, "read_metadata", lambda *args, **kwargs: pytest.fail("Invalid date must not authorize reading legacy dates for replacement"))
+    with pytest.raises(library.AlbumLibraryError, match="known valid MusicBrainz release year"):
+        library.preview_album(folder, metadata)
+
+
+def test_single_disc_stale_filename_conflict_stays_blocked_even_with_strong_metadata(album):
+    folder, metadata = album
+    source = next(folder.glob("01*.mp3"))
+    source.rename(folder / source.name.replace("01", "02", 1))
+    with pytest.raises(library.AlbumLibraryError, match="Conflicting track numbers"):
+        library.preview_album(folder, metadata)
+
+
+def test_conflicting_multiple_embedded_titles_do_not_supply_recovery_evidence(multidisc_album):
+    folder, metadata = multidisc_album
+    _change_fake_tags(next(folder.glob("202*.mp3")), title=["Disc 2 Track 2", "Disc 1 Track 2"])
+    with pytest.raises(library.AlbumLibraryError, match="Conflicting embedded title"):
+        library.preview_album(folder, metadata)
+
+
+@pytest.mark.parametrize("value", [2008, True])
+def test_nontext_release_date_is_blocked_before_legacy_date_replacement(album, value):
+    folder, metadata = album
+    with pytest.raises(library.AlbumLibraryError, match="known valid MusicBrainz release year"):
+        library.preview_album(folder, replace(metadata, date=value))

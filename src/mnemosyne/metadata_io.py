@@ -1,7 +1,9 @@
 from __future__ import annotations
 import hashlib
 from dataclasses import dataclass
+from datetime import date as CalendarDate
 from pathlib import Path
+import re
 from typing import Any
 from mutagen.flac import FLAC, Picture
 from mutagen.id3 import APIC, ID3, ID3NoHeaderError, TALB, TCON, TDRC, TIT2, TPE1, TPE2, TPOS, TRCK
@@ -26,6 +28,72 @@ class MetadataSnapshot:
 _MP4_TAG_MAP = {"title":"\xa9nam","artist":"\xa9ART","album_artist":"aART","album":"\xa9alb","date":"\xa9day","genre":"\xa9gen"}
 _ID3_FRAME_MAP = {"title":TIT2,"artist":TPE1,"album_artist":TPE2,"album":TALB,"date":TDRC,"genre":TCON,"track":TRCK,"disc":TPOS}
 _FLAC_TAG_MAP = {"title":"title","artist":"artist","album_artist":"albumartist","album":"album","date":"date","genre":"genre","track":"tracknumber","disc":"discnumber"}
+_LEGACY_DATE_FRAMES = {"TYER", "TDAT", "TIME"}
+
+
+def _validated_date(value: str) -> str:
+    """Validate caller-owned release dates before any format can change a file."""
+    if not isinstance(value, str) or re.fullmatch(r"[0-9]{4}(?:-[0-9]{2}(?:-[0-9]{2})?)?", value) is None:
+        raise MetadataIOError("Release date must be YYYY, YYYY-MM, or YYYY-MM-DD.")
+    parts = [int(part) for part in value.split("-")]
+    try:
+        CalendarDate(parts[0], parts[1] if len(parts) > 1 else 1, parts[2] if len(parts) > 2 else 1)
+    except ValueError as exc:
+        raise MetadataIOError(f"Invalid release date: {value!r}.") from exc
+    return value
+
+
+def _legacy_recording_date(tags: Any) -> str | None:
+    """Convert v2.3 DDMM/HHMM without losing date precision or time values.
+
+    ID3v2.3 defines TDAT as DDMM and TIME as HHMM (https://id3.org/id3v2.3.0).
+    A zero TDAT placeholder has no month/day value; TYER remains a year-only date.
+    Mutagen's default upgrade accepts impossible dates or discards orphan times,
+    so generic writes require this stricter conversion first.
+    """
+    if not any(tags.getall(name) for name in _LEGACY_DATE_FRAMES):
+        return None
+
+    def value(name: str) -> str | None:
+        frames = tags.getall(name)
+        if not frames:
+            return None
+        values = [str(item) for frame in frames for item in frame.text]
+        if len(values) != 1 or re.fullmatch(r"[0-9]{4}", values[0]) is None:
+            raise MetadataIOError(f"Legacy ID3 frame {name} is ambiguous or malformed; supply a valid replacement release date.")
+        return values[0]
+
+    year, day_month, hour_minute = (value(name) for name in ("TYER", "TDAT", "TIME"))
+    if year is None:
+        frame = "TDAT" if day_month is not None else "TIME"
+        raise MetadataIOError(f"Legacy ID3 frame {frame} has no year and cannot be safely preserved without a replacement release date.")
+    stamp = _validated_date(year)
+    if day_month not in {None, "0000"}:
+        stamp = _validated_date(f"{year}-{day_month[2:]}-{day_month[:2]}")
+    if hour_minute is not None:
+        if day_month in {None, "0000"}:
+            raise MetadataIOError("Legacy ID3 frame TIME has no complete date and cannot be safely preserved without a replacement release date.")
+        hour, minute = int(hour_minute[:2]), int(hour_minute[2:])
+        if hour > 23 or minute > 59:
+            raise MetadataIOError("Legacy ID3 frame TIME is invalid; supply a valid replacement release date.")
+        stamp += f"T{hour:02d}:{minute:02d}:00"
+    canonical = [str(item) for frame in tags.getall("TDRC") for item in frame.text]
+    if canonical and canonical != [stamp]:
+        raise MetadataIOError("Legacy ID3 dates conflict with TDRC; supply a valid replacement release date.")
+    return stamp
+
+
+def _assert_original_id3_year_preservable(tags: Any) -> None:
+    """TORY belongs to the original release and is never owned by a date update."""
+    original = [str(item) for frame in tags.getall("TORY") for item in frame.text]
+    if not original:
+        return
+    if len(original) != 1 or re.fullmatch(r"[0-9]{4}", original[0]) is None:
+        raise MetadataIOError("Legacy ID3 original-release year TORY cannot be safely preserved.")
+    _validated_date(original[0])
+    canonical = [str(item) for frame in tags.getall("TDOR") for item in frame.text]
+    if canonical and canonical != original:
+        raise MetadataIOError("Legacy ID3 original-release year TORY conflicts with TDOR and cannot be safely preserved.")
 
 def _number_pair(value: str) -> tuple[int, int]:
     parts = value.split("/")
@@ -85,7 +153,7 @@ def _replace_id3_front_cover(tags: Any, data: bytes, mime: str):
     for frame in preserved: tags.add(frame)
     tags.add(APIC(encoding=3,mime=mime,type=3,desc="Cover",data=data))
 
-def _assert_id3_preservable(path: Path) -> None:
+def _assert_id3_preservable(path: Path, *, replacing_date: bool = False) -> ID3 | None:
     """Read before Mutagen translation, which can discard obsolete ID3 frames."""
     try:
         raw = ID3(path, translate=False)
@@ -94,24 +162,42 @@ def _assert_id3_preservable(path: Path) -> None:
     except Exception as exc:
         raise MetadataIOError(f"Could not inspect original ID3 frames: {exc}") from exc
     legacy_version = raw.version[1] != 4
-    def inspect(frames):
+    def inspect(frames, *, nested: bool = False):
         if legacy_version and getattr(frames, "unknown_frames", []):
             raise MetadataIOError("ID3 contains unknown legacy frames that cannot be safely preserved when writing ID3v2.4.")
         for frame in frames.values():
             frame_id = getattr(frame, "FrameID", type(frame).__name__)
-            if frame_id in {"RVAD", "EQUA", "TRDA", "TSIZ", "TDAT", "TIME"}:
+            if frame_id in {"RVAD", "EQUA", "TRDA", "TSIZ"} or (nested and frame_id in _LEGACY_DATE_FRAMES | {"TORY"}):
                 raise MetadataIOError(f"Legacy ID3 frame {frame_id} cannot be safely preserved by this metadata writer.")
-            nested = getattr(frame, "sub_frames", None)
-            if nested is not None:
-                inspect(nested)
+            sub_frames = getattr(frame, "sub_frames", None)
+            if sub_frames is not None:
+                inspect(sub_frames, nested=True)
     inspect(raw)
+    _assert_original_id3_year_preservable(raw)
+    if not replacing_date:
+        _legacy_recording_date(raw)
+    return raw
+
+
+def _normalized_id3_tags(raw: ID3, *, replacing_date: bool) -> ID3:
+    """Normalize only owned top-level date frames before Mutagen's upgrade."""
+    legacy_date = None if replacing_date else _legacy_recording_date(raw)
+    for name in _LEGACY_DATE_FRAMES:
+        raw.delall(name)
+    if legacy_date is not None and not raw.getall("TDRC"):
+        raw.add(TDRC(encoding=3, text=[legacy_date]))
+    raw.update_to_v24()
+    return raw
 
 def _write_id3(path: Path, tags: dict[str,str], cover_path: Path|None):
-    _assert_id3_preservable(path)
+    replacing_date = "date" in tags
+    raw = _assert_id3_preservable(path, replacing_date=replacing_date)
     try: audio = MP3(path)
     except Exception as exc: raise MetadataIOError(f"Could not open MP3 audio: {exc}") from exc
     if audio.tags is None: audio.add_tags()
     assert audio.tags is not None
+    if raw is not None:
+        audio.tags = _normalized_id3_tags(raw, replacing_date=replacing_date)
     if audio.tags.unknown_frames and audio.tags.version[1] != 4:
         raise MetadataIOError("ID3 contains unknown legacy frames that cannot be safely preserved when writing ID3v2.4.")
     for friendly,value in tags.items():
@@ -146,6 +232,8 @@ def _write_flac(path: Path, tags: dict[str,str], cover_path: Path|None):
     return MetadataWriteEvidence("flac", data is not None, sha)
 
 def write_metadata(path: Path, tags: dict[str,str], cover_path: Path|None):
+    if "date" in tags:
+        _validated_date(tags["date"])
     family = metadata_family(path)
     if family=="mp4": return _write_mp4(path,tags,cover_path)
     if family=="id3": return _write_id3(path,tags,cover_path)
@@ -181,9 +269,11 @@ def _first_id3_text(tags: Any, frame_id: str):
     if not frames: return []
     return _text_list(getattr(frames[0],"text",None))
 
-def _snapshot_id3(path: Path):
-    _assert_id3_preservable(path)
+def _snapshot_id3(path: Path, *, replacing_date: bool = False):
+    raw = _assert_id3_preservable(path, replacing_date=replacing_date)
     audio=MP3(path); tags=audio.tags; friendly={}
+    if raw is not None:
+        tags = _normalized_id3_tags(raw, replacing_date=replacing_date)
     artwork=()
     if tags is not None:
         for name,ft in _ID3_FRAME_MAP.items():
@@ -213,11 +303,12 @@ def _snapshot_flac(path: Path):
     artwork=tuple((str(p.mime or "application/octet-stream"),bytes(p.data)) for p in audio.pictures)
     return MetadataSnapshot("flac",friendly,artwork)
 
-def read_metadata(path: Path):
+def read_metadata(path: Path, *, replacing_date: bool = False):
+    """Read preserved metadata; replacement permission covers top-level ID3 dates only."""
     family=metadata_family(path)
     try:
         if family=="mp4": return _snapshot_mp4(path)
-        if family=="id3": return _snapshot_id3(path)
+        if family=="id3": return _snapshot_id3(path, replacing_date=replacing_date)
         if family=="flac": return _snapshot_flac(path)
     except Exception as exc:
         raise MetadataIOError(f"Could not read {family} metadata from {path.name}: {exc}") from exc

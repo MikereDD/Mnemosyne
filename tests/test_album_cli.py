@@ -96,3 +96,21 @@ def test_album_track_title_format_can_be_selected(album_stubs):
     result = runner.invoke(app, ["album", str(album), "--source-url", SOURCE, "--filename-format", "track-title"])
     assert result.exit_code == 0, result.output
     assert calls[1][2] == AlbumFilenameFormat.TRACK_TITLE
+
+
+def test_album_preview_shows_disc_for_multidisc(album_stubs, monkeypatch):
+    album, _ = album_stubs
+    tracks = tuple(
+        SimpleNamespace(
+            source=album / f"{disc}01-original.mp3",
+            target=album / f"{disc}01 - Title.mp3",
+            tags={"track": "1/1", "disc": f"{disc}/2", "artist": "Artist"},
+        )
+        for disc in (1, 2)
+    )
+    monkeypatch.setattr(album_cli, "preview_album", lambda *args, **kwargs: SimpleNamespace(tracks=tracks, playlists=()))
+    result = runner.invoke(app, ["album", str(album), "--source-url", SOURCE])
+    assert result.exit_code == 0, result.output
+    assert "Disc" in result.output
+    assert "1/2" in result.output
+    assert "2/2" in result.output

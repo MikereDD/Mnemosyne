@@ -46,6 +46,11 @@ uv run mnemosyne album "D:\Music\Artist\Album" --source-url "https://musicbrainz
 The direct Python `preview_album` API retains `track-title` as its default;
 pass `filename_format=AlbumFilenameFormat.FULL` to request the full convention.
 
+For albums with multiple discs in one flat folder, the track component includes
+the disc: `101` is disc 1, track 1; `201` is disc 2, track 1. Track and disc tags
+remain separate, such as track `1/14` and disc `2/2`. The preview displays both
+columns. Single-disc albums keep the existing `01` track component.
+
 After checking the displayed track mapping, run the same command with `--apply`.
 Mnemosyne displays the preview again and asks for confirmation. `--yes` may be
 used with `--apply` when that confirmation is already provided by the caller.
@@ -54,6 +59,10 @@ Written metadata includes title, track artist, album artist, album, track and
 disc numbers, and the selected release's date when known. Genre is retained;
 it is not inferred from the directory or artist. Existing artwork and unrelated
 tags are retained. MP3 uses ID3 tags; FLAC and M4A use their native metadata.
+Legacy MP3 date fields are upgraded without inventing a month or day for
+year-only dates. When MusicBrainz supplies a valid date, it replaces the owned
+release date fields. Other legacy frames that cannot be preserved still block
+the operation.
 
 The operation copies and tags the audio without re-encoding it, verifies tags
 and compressed audio payloads, updates supported album playlists, and retains
@@ -63,9 +72,12 @@ location with `--backup-root`.
 
 Track counts and mapping evidence must agree. Unknown or ambiguous matches,
 conflicting names, changed files, unsupported formats, and unsafe references
-block mutation rather than guessing. The first version supports flat,
-single-disc albums in MP3, FLAC, and M4A. Multi-disc releases and nested audio
-folders are blocked until disc matching is implemented. The scope is one chosen
+block mutation rather than guessing. Flat single-disc and multi-disc albums in
+MP3, FLAC, and M4A are supported. Every source file must identify a unique disc
+and track in the complete selected release. A missing disc tag or stale filename
+can be resolved only when the embedded title and audio length uniquely
+corroborate the track; contradictory embedded disc or track information blocks
+the operation. Nested audio folders are still blocked. The scope is one chosen
 album folder; playlists outside that folder require separate handling.
 
 MusicBrainz is the first implemented metadata source. Other sites require their

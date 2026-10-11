@@ -121,6 +121,7 @@ The tag remains detailed; only physical placement is generalized.
 - [x] Arbitrary album folder and user-selected MusicBrainz release URL
 - [x] Preview complete track matches, canonical filenames, and tags
 - [x] Explicit apply with retained originals, playlist updates, and payload verification
+- [x] Verified disc mapping for flat multi-disc albums and disc-prefixed filenames
 - [ ] Additional music metadata-source adapters
 
 ### eBook and audiobook organization

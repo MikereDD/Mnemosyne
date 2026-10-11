@@ -102,7 +102,7 @@ _OTHER_AUDIO = {".wav", ".wave", ".aiff", ".aif", ".m4b", ".mp4", ".ogg", ".oga"
 _PLAYLISTS = {".m3u", ".m3u8"}
 _OTHER_REFERENCES = {".cue", ".pls", ".xspf", ".wpl", ".asx", ".b4s"}
 _UUID_SUFFIX = re.compile(r"_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
-_TRACK_PREFIX = re.compile(r"^\s*(\d{1,3})(?:\s*[-._]\s*|\s+)(.+)$")
+_TRACK_PREFIX = re.compile(r"^\s*([0-9]+)(?:\s*[-._]\s*|\s+)(.+)$")
 
 
 def _sha256(path: Path) -> str:
@@ -150,7 +150,7 @@ def _album_files(root: Path) -> tuple[Path, ...]:
                 raise AlbumLibraryError("Nested playlists or cue/reference files require a folder-aware reference workflow; album changes are blocked.")
             if path.suffix.lower() in _SUPPORTED_AUDIO | _OTHER_AUDIO:
                 if path.parent != root:
-                    raise AlbumLibraryError("Nested audio/disc folders require a disc-aware workflow; this command supports one flat, single-disc album.")
+                    raise AlbumLibraryError("Nested audio/disc folders require a folder-aware workflow; this command supports one flat album.")
                 if path.suffix.lower() not in _SUPPORTED_AUDIO:
                     raise AlbumLibraryError(f"Album metadata writing is not supported for {path.suffix}; supported formats are MP3, FLAC, and M4A.")
                 audio.append(path)
@@ -294,46 +294,167 @@ def _artwork(snapshot) -> tuple[tuple[str, str], ...]:
     return tuple((mime, hashlib.sha256(data).hexdigest()) for mime, data in snapshot.artwork)
 
 
-def _match_track(path: Path, snapshot, duration: int | None, release: tuple[AlbumTrack, ...]) -> tuple[AlbumTrack, tuple[str, ...]]:
+def _release_disc_counts(release: tuple[AlbumTrack, ...]) -> dict[int, int]:
+    positions: dict[int, list[int]] = {}
+    for track in release:
+        if any(isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 65535 for value in (track.disc, track.number)):
+            raise AlbumLibraryError("Release disc and track positions must be positive supported integers.")
+        positions.setdefault(track.disc, []).append(track.number)
+    if sorted(positions) != list(range(1, len(positions) + 1)):
+        raise AlbumLibraryError("Release disc positions must be complete, unique, and numbered from 1.")
+    for disc, numbers in positions.items():
+        if sorted(numbers) != list(range(1, len(numbers) + 1)):
+            raise AlbumLibraryError(f"Release track positions on disc {disc} must be complete, unique, and numbered from 1.")
+    return {disc: len(numbers) for disc, numbers in positions.items()}
+
+
+def _tag_position(path: Path, tags: dict[str, list[str]], key: str) -> tuple[int | None, int | None]:
+    values = tags.get(key) or []
+    numbers: set[int] = set()
+    totals: set[int] = set()
+    for value in values:
+        match = re.fullmatch(r"\s*([0-9]+)(?:\s*/\s*([0-9]+))?\s*", str(value))
+        if match is None:
+            raise AlbumLibraryError(f"Invalid embedded {key} number in {path.name}: {value!r}.")
+        number = int(match.group(1))
+        total = int(match.group(2)) if match.group(2) else None
+        if not 1 <= number <= 65535 or (total is not None and not number <= total <= 65535):
+            raise AlbumLibraryError(f"Invalid embedded {key} number or total in {path.name}: {value!r}.")
+        numbers.add(number)
+        if total is not None:
+            totals.add(total)
+    if len(numbers) > 1 or len(totals) > 1:
+        raise AlbumLibraryError(f"Conflicting embedded {key} values in {path.name}.")
+    return (next(iter(numbers)) if numbers else None, next(iter(totals)) if totals else None)
+
+
+def _filename_positions(digits: str, disc_counts: dict[int, int]) -> set[tuple[int | None, int]]:
+    number = int(digits)
+    if len(disc_counts) == 1:
+        return {(1, number)} if 1 <= number <= disc_counts[1] else set()
+    positions: set[tuple[int | None, int]] = set()
+    if 1 <= number <= max(disc_counts.values()):
+        positions.add((None, number))
+    # Recognize standard 101/201 names and the wider canonical padding needed
+    # for albums containing more than 99 tracks on a disc.
+    for width in {2, max(2, len(str(max(disc_counts.values()))))}:
+        if len(digits) <= width:
+            continue
+        disc, track = int(digits[:-width]), int(digits[-width:])
+        if disc in disc_counts and 1 <= track <= disc_counts[disc]:
+            positions.add((disc, track))
+    return positions
+
+
+def _title_qualification(value: str) -> tuple[str, tuple[str, ...]]:
+    """Separate trailing guest credits from explicit song-version qualifiers."""
+    remaining = value.strip()
+    qualifiers: list[str] = []
+    while match := re.search(r"\s*\(([^()]*)\)\s*$", remaining):
+        qualifier = match.group(1).strip()
+        remaining = remaining[:match.start()].rstrip()
+        if not re.match(r"^(?:with|feat\.?|featuring|ft\.?)\s+\S", qualifier, re.I):
+            qualifiers.insert(0, _text_identity(qualifier))
+    return _text_identity(remaining), tuple(qualifiers)
+
+
+def _compatible_title_qualification(local: str, canonical: str) -> bool:
+    local_base, local_qualifiers = _title_qualification(local)
+    canonical_base, canonical_qualifiers = _title_qualification(canonical)
+    if not local_base or local_base != canonical_base:
+        return False
+    # A source may supply a qualifier absent from an unqualified local title.
+    # Explicit existing version/live/remix qualifiers must continue to agree.
+    return not local_qualifiers or local_qualifiers == canonical_qualifiers
+
+
+def _match_track(path: Path, snapshot, duration: int | None, release: tuple[AlbumTrack, ...], *, disc_counts: dict[int, int] | None = None) -> tuple[AlbumTrack, tuple[str, ...]]:
+    disc_counts = disc_counts or _release_disc_counts(release)
+    multi_disc = len(disc_counts) > 1
     stem = _UUID_SUFFIX.sub("", path.stem)
     prefix = _TRACK_PREFIX.match(stem)
-    filename_number = int(prefix.group(1)) if prefix else None
-    tag_number = _number(_first(snapshot.tags, "track"))
-    tag_disc = _number(_first(snapshot.tags, "disc"))
-    if tag_disc is not None and tag_disc != 1:
-        raise AlbumLibraryError(f"{path.name} carries disc {tag_disc}; only a verified single disc is supported.")
-    if tag_number and filename_number and tag_number != filename_number:
+    filename_positions = _filename_positions(prefix.group(1), disc_counts) if prefix else set()
+    tag_number, track_total = _tag_position(path, snapshot.tags, "track")
+    tag_disc, disc_total = _tag_position(path, snapshot.tags, "disc")
+    if tag_disc is not None and tag_disc not in disc_counts:
+        raise AlbumLibraryError(f"Conflicting embedded disc number in {path.name}: disc {tag_disc} is not in the selected release.")
+    if disc_total is not None and disc_total != len(disc_counts):
+        raise AlbumLibraryError(f"Embedded disc total in {path.name} conflicts with the selected release.")
+    if track_total is not None and track_total not in ({disc_counts[tag_disc]} if tag_disc is not None else set(disc_counts.values())):
+        raise AlbumLibraryError(f"Embedded track total in {path.name} conflicts with the selected release.")
+    if not multi_disc and tag_number is not None and prefix is not None and int(prefix.group(1)) != tag_number:
         raise AlbumLibraryError(f"Conflicting track numbers in filename and tags: {path.name}.")
-    position = tag_number or filename_number
+    if multi_disc and len({_text_identity(str(value)) for value in snapshot.tags.get("title", []) if str(value).strip()}) > 1:
+        raise AlbumLibraryError(f"Conflicting embedded title values in {path.name}.")
     embedded_title = _first(snapshot.tags, "title")
     title_keys = {_text_identity(title) for title in (embedded_title, prefix.group(2) if prefix else None) if title}
-    if position is None and not embedded_title:
+    if tag_number is None and prefix is None and not embedded_title:
         raise AlbumLibraryError(f"Cannot safely identify {path.name}: no track tag or numeric filename prefix. Alphabetic order is not used.")
-    candidates: list[tuple[AlbumTrack, tuple[str, ...]]] = []
-    for track in release:
-        if position is not None and track.number != position:
-            continue
-        evidence: list[str] = []
+    hard_candidates = [track for track in release if (tag_disc is None or track.disc == tag_disc) and (tag_number is None or track.number == tag_number) and (track_total is None or disc_counts[track.disc] == track_total)]
+    candidates: list[tuple[AlbumTrack, bool, bool, bool]] = []
+    embedded_key = _text_identity(embedded_title) if embedded_title else ""
+    for track in hard_candidates:
+        embedded_match = bool(embedded_key) and embedded_key == _text_identity(track.title)
         title_match = _text_identity(track.title) in title_keys
         duration_match = duration is not None and track.length_ms is not None and abs(duration - track.length_ms) <= max(3000, round(track.length_ms * 0.01))
         if duration is not None and track.length_ms is not None and not duration_match:
             continue
+        compatible_title = (
+            multi_disc and bool(embedded_title) and not embedded_match and duration_match
+            and tag_disc == track.disc and tag_number == track.number
+            and filename_positions == {(track.disc, track.number)}
+            and _compatible_title_qualification(embedded_title, track.title)
+        )
+        if multi_disc and embedded_title and not embedded_match and not compatible_title:
+            continue
+        title_match = title_match or compatible_title
         if not title_match and not duration_match:
             continue
-        if position is None and (not title_match or not embedded_title or _text_identity(embedded_title) != _text_identity(track.title)):
+        if tag_number is None and prefix is None and not embedded_match:
             continue
-        if tag_number:
-            evidence.append("embedded-track-number")
-        if filename_number:
-            evidence.append("filename-track-number")
-        if title_match:
-            evidence.append("matching-title")
-        if duration_match:
-            evidence.append("matching-duration")
-        candidates.append((track, tuple(evidence)))
-    if len(candidates) != 1:
-        raise AlbumLibraryError(f"{path.name} has {'ambiguous' if candidates else 'insufficient or conflicting'} title/duration evidence for the selected MusicBrainz release.")
-    return candidates[0]
+        candidates.append((track, embedded_match and duration_match, title_match, duration_match))
+    filename_candidates = {(track.disc, track.number) for track in hard_candidates if any(number == track.number and (disc is None or disc == track.disc) for disc, number in filename_positions)}
+    eligible = []
+    for candidate in candidates:
+        track, strong, _, _ = candidate
+        filename_match = any(number == track.number and (disc is None or disc == track.disc) for disc, number in filename_positions)
+        if prefix is not None and not filename_match:
+            continue
+        disc_identified = tag_disc is not None or (len(filename_candidates) == 1 and (track.disc, track.number) in filename_positions)
+        if multi_disc and (not disc_identified or (tag_number is None and prefix is None)) and not strong:
+            continue
+        eligible.append(candidate)
+    overridden = False
+    if len(eligible) == 1:
+        chosen = eligible[0]
+    else:
+        # A stale/ambiguous filename may be repaired only through unique strong
+        # embedded evidence within every trusted disc/track constraint. This is
+        # checked against the whole release, never the remaining spare slots.
+        strong_candidates = [candidate for candidate in candidates if candidate[1]] if multi_disc else []
+        if len(strong_candidates) != 1:
+            if tag_number is not None and prefix is not None and filename_positions and all(number != tag_number for _, number in filename_positions):
+                raise AlbumLibraryError(f"Conflicting track numbers in filename and tags: {path.name}.")
+            raise AlbumLibraryError(f"{path.name} has {'ambiguous' if len(eligible) > 1 or len(strong_candidates) > 1 else 'insufficient or conflicting'} title/duration evidence for the selected MusicBrainz release.")
+        chosen = strong_candidates[0]
+        overridden = prefix is not None
+    track, _, title_match, duration_match = chosen
+    evidence = []
+    if tag_number is not None:
+        evidence.append("embedded-track-number")
+    if tag_disc is not None:
+        evidence.append("embedded-disc-number")
+    if prefix is not None:
+        evidence.append("filename-position-overridden" if overridden else "filename-track-number")
+        if not overridden and (track.disc, track.number) in filename_positions and multi_disc:
+            evidence.append("filename-disc-number")
+    if title_match:
+        evidence.append("matching-title")
+        if multi_disc and embedded_title and embedded_key != _text_identity(track.title):
+            evidence.append("compatible-title-qualification")
+    if duration_match:
+        evidence.append("matching-duration")
+    return track, tuple(evidence)
 
 
 def _rewrite_reference(reference: str, album: Path, mapping: dict[str, AlbumTrackPlan]) -> str:
@@ -391,7 +512,7 @@ def _playlist_plans(album: Path, tracks: tuple[AlbumTrackPlan, ...]) -> tuple[Al
 
 
 def _release_year(value: str | None) -> str:
-    if not value or not re.fullmatch(r"[0-9]{4}(?:-[0-9]{2}(?:-[0-9]{2})?)?", value):
+    if not isinstance(value, str) or not re.fullmatch(r"[0-9]{4}(?:-[0-9]{2}(?:-[0-9]{2})?)?", value):
         raise AlbumLibraryError("Full filenames require a known valid MusicBrainz release year; use track-title format when the release date is unknown.")
     complete = value + ("-01-01" if len(value) == 4 else "-01" if len(value) == 7 else "")
     try:
@@ -412,37 +533,42 @@ def preview_album(album_dir: Path, metadata: AlbumMetadata, *, filename_format: 
         raise AlbumLibraryError("MusicBrainz release provenance, album title, and artist must be complete.")
     if not metadata.tracks:
         raise AlbumLibraryError("The selected release has no tracks.")
-    release_year = _release_year(metadata.date) if selected_format is AlbumFilenameFormat.FULL else None
-    if {track.disc for track in metadata.tracks} != {1}:
-        raise AlbumLibraryError("Multi-disc releases require verified disc mapping; this command currently supports a flat single-disc album.")
-    if sorted(track.number for track in metadata.tracks) != list(range(1, len(metadata.tracks) + 1)):
-        raise AlbumLibraryError("Release track positions must be complete, unique, and numbered from 1.")
+    release_year = _release_year(metadata.date) if metadata.date is not None or selected_format is AlbumFilenameFormat.FULL else None
+    disc_counts = _release_disc_counts(metadata.tracks)
+    track_width = max(2, len(str(max(disc_counts.values()))))
+    disc_width = max(1, len(str(len(disc_counts))))
     files = _album_files(album)
     if len(files) != len(metadata.tracks):
         raise AlbumLibraryError(f"Album is incomplete or has extra audio: found {len(files)} local tracks; the selected release has {len(metadata.tracks)}.")
     plans: list[AlbumTrackPlan] = []
-    assigned: set[int] = set()
+    assigned: set[tuple[int, int]] = set()
     for source in files:
         try:
-            snapshot = read_metadata(source)
+            snapshot = read_metadata(source, replacing_date=bool(metadata.date))
             duration = _duration_ms(source)
-            track, evidence = _match_track(source, snapshot, duration, metadata.tracks)
+            track, evidence = _match_track(source, snapshot, duration, metadata.tracks, disc_counts=disc_counts)
         except MetadataIOError as exc:
             raise AlbumLibraryError(str(exc)) from exc
-        if track.number in assigned:
-            raise AlbumLibraryError(f"More than one local file matches release track {track.number}; mapping is ambiguous.")
-        assigned.add(track.number)
-        components = [f"{track.number:02d}", sanitize_component(track.title)]
+        position = track.disc, track.number
+        if position in assigned:
+            raise AlbumLibraryError(f"More than one local file matches release disc {track.disc}, track {track.number}; mapping is ambiguous.")
+        assigned.add(position)
+        number_component = f"{track.number:0{track_width}d}"
+        if len(disc_counts) > 1:
+            number_component = f"{track.disc:0{disc_width}d}" + number_component
+        components = [number_component, sanitize_component(track.title)]
         if selected_format is AlbumFilenameFormat.FULL:
             components.extend((sanitize_component(metadata.title), sanitize_component(track.artist or metadata.artist), f"({release_year})"))
         filename = " - ".join(components) + source.suffix
         if len(filename.encode("utf-16-le")) // 2 > 255:
             raise AlbumLibraryError(f"Canonical filename exceeds the Windows component limit: {filename}")
         target = album / filename
-        tags = {"title": track.title, "artist": track.artist or metadata.artist, "album_artist": metadata.artist, "album": metadata.title, "track": f"{track.number}/{len(metadata.tracks)}", "disc": "1/1"}
+        tags = {"title": track.title, "artist": track.artist or metadata.artist, "album_artist": metadata.artist, "album": metadata.title, "track": f"{track.number}/{disc_counts[track.disc]}", "disc": f"{track.disc}/{len(disc_counts)}"}
         if metadata.date:
             tags["date"] = metadata.date
         plans.append(AlbumTrackPlan(source, target, tags, _sha256(source), audio_payload_sha256(source), evidence, tuple(sorted((key, tuple(values)) for key, values in snapshot.tags.items())), _artwork(snapshot), duration))
+    if assigned != {(track.disc, track.number) for track in metadata.tracks}:
+        raise AlbumLibraryError("The local album does not completely and uniquely cover every release disc and track.")
     sources = {str(path).casefold() for path in files}
     destinations: set[str] = set()
     for track in plans:
@@ -453,7 +579,7 @@ def preview_album(album_dir: Path, metadata: AlbumMetadata, *, filename_format: 
         for existing in album.iterdir():
             if existing.name.casefold() == track.target.name.casefold() and str(existing).casefold() not in sources:
                 raise AlbumLibraryError(f"Destination already exists and will not be overwritten: {existing.name}")
-    tracks = tuple(sorted(plans, key=lambda item: _number(item.tags["track"]) or 0))
+    tracks = tuple(sorted(plans, key=lambda item: (_number(item.tags["disc"]) or 0, _number(item.tags["track"]) or 0)))
     playlists = _playlist_plans(album, tracks)
     return AlbumPlan(album, metadata, tracks, playlists, f"album-plan-{uuid.uuid4().hex}", selected_format)
 
